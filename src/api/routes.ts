@@ -94,7 +94,7 @@ import { attachDataQuality, buildCoreSignalFidelity, buildRepoDataQuality, build
 import { buildPullRequestReviewability } from "../signals/reward-risk";
 import { buildLocalBranchAnalysis } from "../signals/local-branch";
 import type { ContributorEvidenceRecord, JobMessage, JsonValue, RepoSyncSegmentRecord } from "../types";
-import { nowIso } from "../utils/json";
+import { errorMessage, nowIso } from "../utils/json";
 
 type AppBindings = { Bindings: Env };
 
@@ -203,9 +203,16 @@ const scorePreviewSchema = z.object({
 });
 
 const repositorySettingsSchema = z.object({
-  commentMode: z.enum(["off", "detected_contributors_only", "all_prs"]),
+  commentMode: z.enum(["off", "detected_contributors_only", "all_prs"]).default("detected_contributors_only"),
   publicSignalLevel: z.enum(["minimal", "standard"]).default("standard"),
+  checkRunMode: z.enum(["off", "enabled"]).default("off"),
   checkRunDetailLevel: z.enum(["minimal", "standard", "deep"]).default("standard"),
+  autoLabelEnabled: z.boolean().default(true),
+  gittensorLabel: z.string().trim().min(1).max(50).default("gittensor"),
+  createMissingLabel: z.boolean().default(true),
+  publicSurface: z.enum(["off", "comment_and_label", "comment_only", "label_only"]).default("comment_and_label"),
+  includeMaintainerAuthors: z.boolean().default(false),
+  requireLinkedIssue: z.boolean().default(false),
   backfillEnabled: z.boolean().default(true),
   privateTrustEnabled: z.boolean().default(true),
 });
@@ -265,7 +272,8 @@ export function createApp() {
         201,
       );
     } catch (error) {
-      return c.json({ error: error instanceof Error ? error.message : "github_device_flow_start_failed" }, error instanceof Error && error.message === "github_oauth_not_configured" ? 503 : 502);
+      const message = errorMessage(error, "github_device_flow_start_failed");
+      return c.json({ error: message }, message === "github_oauth_not_configured" ? 503 : 502);
     }
   });
 
@@ -276,7 +284,8 @@ export function createApp() {
     try {
       return c.json(await pollGitHubDeviceFlow(c.env, deviceCode));
     } catch (error) {
-      return c.json({ error: error instanceof Error ? error.message : "github_device_flow_poll_failed" }, error instanceof Error && error.message === "github_oauth_not_configured" ? 503 : 502);
+      const message = errorMessage(error, "github_device_flow_poll_failed");
+      return c.json({ error: message }, message === "github_oauth_not_configured" ? 503 : 502);
     }
   });
 
@@ -287,7 +296,7 @@ export function createApp() {
     try {
       return c.json(await createSessionFromGitHubToken(c.env, githubToken, { source: "github_token_exchange" }), 201);
     } catch (error) {
-      return c.json({ error: error instanceof Error ? error.message : "github_session_create_failed" }, 401);
+      return c.json({ error: errorMessage(error, "github_session_create_failed") }, 401);
     }
   });
 
@@ -495,6 +504,16 @@ export function createApp() {
   app.get("/v1/repos/:owner/:repo/intelligence", async (c) => {
     const fullName = `${c.req.param("owner")}/${c.req.param("repo")}`;
     return c.json(await buildRepoIntelligenceResponse(c.env, fullName));
+  });
+
+  app.get("/v1/repos/:owner/:repo/registration-readiness", async (c) => {
+    const fullName = `${c.req.param("owner")}/${c.req.param("repo")}`;
+    return c.json(await buildRegistrationReadinessResponse(c.env, fullName));
+  });
+
+  app.get("/v1/repos/:owner/:repo/gittensor-config-recommendation", async (c) => {
+    const fullName = `${c.req.param("owner")}/${c.req.param("repo")}`;
+    return c.json(await buildGittensorConfigRecommendationResponse(c.env, fullName));
   });
 
   app.get("/v1/repos/:owner/:repo/settings", async (c) => {
@@ -864,8 +883,14 @@ export function createApp() {
         repoFullName: fullName,
         commentMode: parsed.data.commentMode,
         publicSignalLevel: parsed.data.publicSignalLevel,
-        checkRunMode: "enabled",
+        checkRunMode: parsed.data.checkRunMode,
         checkRunDetailLevel: parsed.data.checkRunDetailLevel,
+        autoLabelEnabled: parsed.data.autoLabelEnabled,
+        gittensorLabel: parsed.data.gittensorLabel,
+        createMissingLabel: parsed.data.createMissingLabel,
+        publicSurface: parsed.data.publicSurface,
+        includeMaintainerAuthors: parsed.data.includeMaintainerAuthors,
+        requireLinkedIssue: parsed.data.requireLinkedIssue,
         backfillEnabled: parsed.data.backfillEnabled,
         privateTrustEnabled: parsed.data.privateTrustEnabled,
       }),
@@ -933,6 +958,101 @@ async function buildRepoIntelligenceResponse(env: Env, fullName: string) {
     maintainerCutReadiness,
     contributorIntakeHealth,
     dataQuality,
+  };
+}
+
+async function buildRegistrationReadinessResponse(env: Env, fullName: string) {
+  const intelligence = await buildRepoIntelligenceResponse(env, fullName);
+  const settings = await getRepositorySettings(env, fullName);
+  const repo = intelligence.repo;
+  const configQuality = intelligence.configQuality as ReturnType<typeof buildConfigQuality>;
+  const maintainerCutReadiness = intelligence.maintainerCutReadiness as ReturnType<typeof buildMaintainerCutReadiness>;
+  const contributorIntakeHealth = intelligence.contributorIntakeHealth as ReturnType<typeof buildContributorIntakeHealth>;
+  const lane = buildLaneAdvice(repo, fullName);
+  const blockers = [
+    ...(!repo?.isRegistered ? ["Repository is not registered in the latest Gittensory registry snapshot."] : []),
+    ...(configQuality.level === "fragile" ? ["Repository config quality is fragile."] : []),
+    ...(contributorIntakeHealth.level === "blocked" ? ["Contributor intake health is blocked."] : []),
+  ];
+  const warnings = [
+    ...(configQuality.level === "needs_attention" ? ["Repository config quality needs attention before registration promotion."] : []),
+    ...(contributorIntakeHealth.level === "strained" ? ["Contributor intake is strained; expect more maintainer triage."] : []),
+    ...(settings.publicSurface === "off" ? ["GitHub App public surface is disabled; maintainers will not get comment/label assistance."] : []),
+  ];
+  const issuePolicy =
+    lane.lane === "issue_discovery"
+      ? "issue_discovery_enabled"
+      : lane.lane === "split"
+        ? "split_pr_and_issue_discovery_enabled"
+      : settings.requireLinkedIssue
+        ? "direct_pr_requires_linked_issue"
+        : "direct_pr_no_issue_required";
+  const ready = blockers.length === 0 && !["fragile", "needs_attention"].includes(configQuality.level);
+  return {
+    repoFullName: fullName,
+    generatedAt: nowIso(),
+    ready,
+    recommendedRegistrationMode: lane.lane === "issue_discovery" ? "issue_discovery" : lane.lane === "split" ? "split" : "direct_pr",
+    issuePolicy,
+    labelPolicy: {
+      autoLabelEnabled: settings.autoLabelEnabled,
+      label: settings.gittensorLabel,
+      createMissingLabel: settings.createMissingLabel,
+      configuredRegistryLabels: configQuality.configuredLabels,
+      missingOrUnusedRegistryLabels: configQuality.notObservedConfiguredLabels,
+    },
+    maintainerCutReadiness,
+    contributorIntakeHealth,
+    docsCompleteness: {
+      status: "repo_docs_not_crawled",
+      requiredDocs: ["README", "CONTRIBUTING", "SECURITY", "SUPPORT"],
+      note: "Gittensory validates public repo docs from the local project during CI; remote repo-doc crawling is not enabled in this signal yet.",
+    },
+    blockers,
+    warnings,
+    dataQuality: intelligence.dataQuality,
+  };
+}
+
+async function buildGittensorConfigRecommendationResponse(env: Env, fullName: string) {
+  const intelligence = await buildRepoIntelligenceResponse(env, fullName);
+  const settings = await getRepositorySettings(env, fullName);
+  const repo = intelligence.repo;
+  const lane = buildLaneAdvice(repo, fullName);
+  const configQuality = intelligence.configQuality as ReturnType<typeof buildConfigQuality>;
+  const contributorIntakeHealth = intelligence.contributorIntakeHealth as ReturnType<typeof buildContributorIntakeHealth>;
+  const maintainerCutReadiness = intelligence.maintainerCutReadiness as ReturnType<typeof buildMaintainerCutReadiness>;
+  const current = repo?.registryConfig ?? null;
+  const shouldEnableIssueDiscovery = contributorIntakeHealth.level === "healthy" && configQuality.level === "excellent";
+  const recommendedIssueDiscoveryShare = shouldEnableIssueDiscovery ? 0.1 : 0;
+  const currentAllocation = current?.emissionShare ?? 0;
+  const directPrShare = Math.max(0, currentAllocation - recommendedIssueDiscoveryShare);
+  const recommendedMaintainerCut = maintainerCutReadiness.ready ? Math.max(current?.maintainerCut ?? 0, 0.02) : current?.maintainerCut ?? 0;
+  return {
+    repoFullName: fullName,
+    generatedAt: nowIso(),
+    privateOnly: true,
+    current,
+    recommended: {
+      participationMode: recommendedIssueDiscoveryShare > 0 ? "split" : "direct_pr",
+      issueDiscoveryShare: recommendedIssueDiscoveryShare,
+      directPrShare,
+      maintainerCut: recommendedMaintainerCut,
+      requireLinkedIssue: settings.requireLinkedIssue,
+      labelMultipliers: configQuality.configuredLabels.length > 0 ? "keep_current_and_prune_unused" : "start_without_trusted_label_multipliers",
+      publicSurface: settings.publicSurface,
+      confirmedMinerLabel: settings.gittensorLabel,
+    },
+    reasons: [
+      lane.lane === "issue_discovery" ? "The current registry lane already routes meaningful work through issue discovery." : "Direct-PR mode is the safest default until issue-discovery intake is intentionally staffed.",
+      shouldEnableIssueDiscovery ? "Config and intake signals are strong enough to consider a small issue-discovery slice." : "Issue discovery should stay disabled until config quality and intake health are excellent.",
+      maintainerCutReadiness.ready ? "Maintainer cut can be considered because config and queue signals are clean." : "Maintainer cut should stay unchanged until readiness blockers are cleared.",
+    ],
+    warnings: [
+      ...(configQuality.notObservedConfiguredLabels.length > 0 ? [`${configQuality.notObservedConfiguredLabels.length} configured label(s) have not been observed in cached repo activity.`] : []),
+      ...(contributorIntakeHealth.level === "strained" || contributorIntakeHealth.level === "blocked" ? [`Contributor intake is ${contributorIntakeHealth.level}; avoid increasing noisy lanes yet.`] : []),
+    ],
+    dataQuality: intelligence.dataQuality,
   };
 }
 

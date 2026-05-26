@@ -17,6 +17,7 @@ import {
   upsertPullRequestFromGitHub,
   persistScoringModelSnapshot,
   upsertRepositoryFromGitHub,
+  upsertRepositorySettings,
 } from "../../src/db/repositories";
 import { createApp } from "../../src/api/routes";
 import { normalizeRegistryPayload } from "../../src/registry/normalize";
@@ -31,6 +32,9 @@ describe("api routes", () => {
   it("serves health openly and keeps OpenAPI private", async () => {
     const app = createApp();
     const env = createTestEnv();
+
+    const preflight = await app.request("/v1/repos", { method: "OPTIONS", headers: { origin: "https://gittensory.aethereal.dev" } }, env);
+    expect(preflight.status).toBe(204);
 
     const health = await app.request("/health", {}, env);
     expect(health.status).toBe(200);
@@ -232,6 +236,30 @@ describe("api routes", () => {
       dataQuality: expect.any(Object),
     });
 
+    const registrationReadiness = await app.request("/v1/repos/entrius/allways-ui/registration-readiness", { headers: apiHeaders(env) }, env);
+    expect(registrationReadiness.status).toBe(200);
+    await expect(registrationReadiness.json()).resolves.toMatchObject({
+      repoFullName: "entrius/allways-ui",
+      recommendedRegistrationMode: "direct_pr",
+      issuePolicy: "direct_pr_no_issue_required",
+      labelPolicy: { label: "gittensor" },
+      docsCompleteness: { status: "repo_docs_not_crawled" },
+      dataQuality: expect.any(Object),
+    });
+
+    const configRecommendation = await app.request("/v1/repos/entrius/allways-ui/gittensor-config-recommendation", { headers: apiHeaders(env) }, env);
+    expect(configRecommendation.status).toBe(200);
+    await expect(configRecommendation.json()).resolves.toMatchObject({
+      repoFullName: "entrius/allways-ui",
+      privateOnly: true,
+      recommended: {
+        participationMode: "direct_pr",
+        issueDiscoveryShare: 0,
+        confirmedMinerLabel: "gittensor",
+      },
+      reasons: expect.arrayContaining([expect.stringMatching(/Direct-PR|Direct-PR|Direct/i)]),
+    });
+
     for (const path of [
       "/v1/repos/entrius/allways-ui/queue-health",
       "/v1/repos/entrius/allways-ui/collisions",
@@ -419,6 +447,37 @@ describe("api routes", () => {
     );
     expect(localBranchWithMcpToken.status).toBe(200);
 
+    const localBranchWithHeadRefOnly = await app.request(
+      "/v1/local/branch-analysis",
+      {
+        method: "POST",
+        headers: apiHeaders(env),
+        body: JSON.stringify({
+          login: "oktofeesh1",
+          repoFullName: "entrius/allways-ui",
+          headRef: "head-only",
+          changedFiles: [{ path: "src/cache.ts", additions: 1, deletions: 0 }],
+        }),
+      },
+      env,
+    );
+    expect(localBranchWithHeadRefOnly.status).toBe(200);
+
+    const localBranchWithLocalTarget = await app.request(
+      "/v1/local/branch-analysis",
+      {
+        method: "POST",
+        headers: apiHeaders(env),
+        body: JSON.stringify({
+          login: "oktofeesh1",
+          repoFullName: "entrius/allways-ui",
+          changedFiles: [{ path: "src/cache.ts", additions: 1, deletions: 0 }],
+        }),
+      },
+      env,
+    );
+    expect(localBranchWithLocalTarget.status).toBe(200);
+
     const sourceContentRejected = await app.request(
       "/v1/local/branch-analysis",
       {
@@ -486,8 +545,9 @@ describe("api routes", () => {
     expect(installationHealth.status).toBe(200);
     await expect(installationHealth.json()).resolves.toMatchObject({
       installationId: 123,
-      requiredPermissions: { checks: "write", metadata: "read", pull_requests: "read", issues: "read" },
-      permissionRemediation: expect.arrayContaining([expect.objectContaining({ permission: "checks", ok: true })]),
+      requiredPermissions: { metadata: "read", pull_requests: "read", issues: "write" },
+      optionalPermissions: { checks: "write" },
+      permissionRemediation: expect.arrayContaining([expect.objectContaining({ permission: "issues", ok: true })]),
       repairSteps: ["No repair needed."],
     });
 
@@ -680,6 +740,19 @@ describe("api routes", () => {
     const app = createApp();
     const env = createTestEnv({ GITHUB_PUBLIC_TOKEN: "public-token" });
     await seedSignalData(env);
+    await upsertInstallationHealth(env, {
+      installationId: 123,
+      accountLogin: "entrius",
+      repositorySelection: "selected",
+      installedReposCount: 1,
+      registeredInstalledCount: 1,
+      status: "needs_attention",
+      missingPermissions: ["issues"],
+      missingEvents: [],
+      permissions: { metadata: "read", pull_requests: "read" },
+      events: ["issues", "pull_request", "repository"],
+      checkedAt: "2026-05-23T00:00:00.000Z",
+    });
     await upsertRepoSyncSegment(env, {
       repoFullName: "entrius/allways-ui",
       segment: "open_pull_requests",
@@ -704,6 +777,18 @@ describe("api routes", () => {
       completedAt: "2026-05-23T00:00:00.000Z",
       warnings: ["secondary rate limit"],
     });
+    await upsertRepoSyncSegment(env, {
+      repoFullName: "entrius/allways-ui",
+      segment: "check_summaries",
+      status: "stale",
+      sourceKind: "github",
+      mode: "full",
+      fetchedCount: 2,
+      expectedCount: 2,
+      pageCount: 1,
+      completedAt: "2026-05-23T00:00:00.000Z",
+      warnings: ["old check data"],
+    });
 
     const readiness = await app.request("/v1/readiness", { headers: apiHeaders(env) }, env);
     expect(readiness.status).toBe(200);
@@ -715,15 +800,18 @@ describe("api routes", () => {
         status: "blocked",
         cappedRepos: ["entrius/allways-ui"],
         rateLimitedRepos: ["entrius/allways-ui"],
+        staleRepos: ["entrius/allways-ui"],
         nextRecoverableAt: "2026-05-27T00:00:00.000Z",
       },
       cappedRepos: ["entrius/allways-ui"],
       rateLimitedRepos: ["entrius/allways-ui"],
+      staleRepos: ["entrius/allways-ui"],
       nextRecoverableAt: "2026-05-27T00:00:00.000Z",
       githubBackfill: {
         cappedSegments: [expect.objectContaining({ repoFullName: "entrius/allways-ui", segment: "open_pull_requests", nextCursor: "2" })],
         rateLimitedSegments: [expect.objectContaining({ repoFullName: "entrius/allways-ui", segment: "open_issues", rateLimitResetAt: "2026-05-27T00:00:00.000Z" })],
       },
+      warnings: expect.arrayContaining([expect.stringContaining("repo sync(s) are stale"), "One or more GitHub App installations need attention."]),
     });
 
     const syncStatus = await app.request("/v1/sync/status", { headers: apiHeaders(env) }, env);
@@ -734,6 +822,28 @@ describe("api routes", () => {
         expect.objectContaining({ repoFullName: "entrius/allways-ui", segment: "open_pull_requests", status: "capped" }),
         expect.objectContaining({ repoFullName: "entrius/allways-ui", segment: "open_issues", status: "rate_limited" }),
       ]),
+    });
+
+    const refreshingEnv = createTestEnv({ GITHUB_PUBLIC_TOKEN: "public-token" });
+    await seedSignalData(refreshingEnv);
+    await upsertRepoSyncSegment(refreshingEnv, {
+      repoFullName: "entrius/allways-ui",
+      segment: "labels",
+      status: "running",
+      sourceKind: "github",
+      mode: "resume",
+      fetchedCount: 2,
+      expectedCount: 2,
+      pageCount: 1,
+      completedAt: "2026-05-23T00:00:00.000Z",
+      warnings: [],
+    });
+    const refreshingReadiness = await app.request("/v1/readiness", { headers: apiHeaders(refreshingEnv) }, refreshingEnv);
+    expect(refreshingReadiness.status).toBe(200);
+    await expect(refreshingReadiness.json()).resolves.toMatchObject({
+      readyForPublicReview: true,
+      coreSignalFidelity: { status: "complete", refreshingRepos: ["entrius/allways-ui"] },
+      warnings: expect.arrayContaining([expect.stringContaining("repo(s) are refreshing")]),
     });
   });
 
@@ -1227,6 +1337,313 @@ describe("api routes", () => {
     expect(JSON.stringify(missingBountyPayload)).toMatch(/Bounty not found|error|isError/i);
   }, 15_000);
 
+  it("covers registration-readiness policy variants for repo-owner launch planning", async () => {
+    const app = createApp();
+    const env = createTestEnv();
+    await seedSignalData(env);
+
+    const unknownReadiness = await app.request("/v1/repos/JSONbored/gittensory/registration-readiness", { headers: apiHeaders(env) }, env);
+    expect(unknownReadiness.status).toBe(200);
+    await expect(unknownReadiness.json()).resolves.toMatchObject({
+      ready: false,
+      recommendedRegistrationMode: "direct_pr",
+      blockers: expect.arrayContaining(["Repository is not registered in the latest Gittensory registry snapshot."]),
+    });
+
+    await upsertRepositorySettings(env, {
+      repoFullName: "entrius/allways-ui",
+      publicSurface: "off",
+      requireLinkedIssue: true,
+      autoLabelEnabled: false,
+      createMissingLabel: false,
+      gittensorLabel: "gittensor-miner",
+    });
+    const directReadiness = await app.request("/v1/repos/entrius/allways-ui/registration-readiness", { headers: apiHeaders(env) }, env);
+    expect(directReadiness.status).toBe(200);
+    await expect(directReadiness.json()).resolves.toMatchObject({
+      issuePolicy: "direct_pr_requires_linked_issue",
+      labelPolicy: { autoLabelEnabled: false, label: "gittensor-miner", createMissingLabel: false },
+      warnings: expect.arrayContaining(["GitHub App public surface is disabled; maintainers will not get comment/label assistance."]),
+    });
+
+    await persistRegistrySnapshot(
+      env,
+      normalizeRegistryPayload(
+        {
+          "entrius/allways-ui": {
+            emission_share: 0.01107,
+            issue_discovery_share: 0.01,
+            label_multipliers: {},
+            trusted_label_pipeline: false,
+            maintainer_cut: 0.03,
+          },
+        },
+        { kind: "raw-github", url: "https://example.test/issue-discovery-registry.json" },
+        "2026-05-26T00:00:00.000Z",
+      ),
+    );
+    const issueDiscoveryReadiness = await app.request("/v1/repos/entrius/allways-ui/registration-readiness", { headers: apiHeaders(env) }, env);
+    expect(issueDiscoveryReadiness.status).toBe(200);
+    await expect(issueDiscoveryReadiness.json()).resolves.toMatchObject({
+      recommendedRegistrationMode: "split",
+      issuePolicy: "split_pr_and_issue_discovery_enabled",
+    });
+
+    const recommendation = await app.request("/v1/repos/entrius/allways-ui/gittensor-config-recommendation", { headers: apiHeaders(env) }, env);
+    expect(recommendation.status).toBe(200);
+    await expect(recommendation.json()).resolves.toMatchObject({
+      privateOnly: true,
+      current: { issueDiscoveryShare: 0.01, maintainerCut: 0.03 },
+      recommended: {
+        requireLinkedIssue: true,
+        confirmedMinerLabel: "gittensor-miner",
+        publicSurface: "off",
+      },
+      reasons: expect.arrayContaining([expect.stringMatching(/issue discovery|Direct-PR/i)]),
+    });
+  });
+
+  it("covers modern route fallback branches, stale snapshots, and launch-readiness edge policies", async () => {
+    const queued: unknown[] = [];
+    const app = createApp();
+    const env = createTestEnv({
+      JOBS: {
+        async send(message: unknown) {
+          queued.push(message);
+        },
+      } as unknown as Queue,
+    });
+
+    const deviceStart = await app.request("/v1/auth/github/device/start", { method: "POST" }, env);
+    expect(deviceStart.status).toBe(503);
+    const deviceMissingCode = await app.request("/v1/auth/github/device/poll", { method: "POST", body: JSON.stringify({}) }, env);
+    expect(deviceMissingCode.status).toBe(400);
+    const devicePollUnconfigured = await app.request("/v1/auth/github/device/poll", { method: "POST", body: JSON.stringify({ deviceCode: "abc" }) }, env);
+    expect(devicePollUnconfigured.status).toBe(503);
+    const sessionMissingToken = await app.request("/v1/auth/github/session", { method: "POST", body: JSON.stringify({}) }, env);
+    expect(sessionMissingToken.status).toBe(400);
+    vi.stubGlobal("fetch", async () => new Response("bad token", { status: 401 }));
+    const sessionRejected = await app.request("/v1/auth/github/session", { method: "POST", body: JSON.stringify({ githubToken: "bad" }) }, env);
+    expect(sessionRejected.status).toBe(401);
+    const unauthenticatedSession = await app.request("/v1/auth/session", {}, env);
+    expect(unauthenticatedSession.status).toBe(401);
+    const logout = await app.request("/v1/auth/logout", { method: "POST" }, env);
+    await expect(logout.json()).resolves.toMatchObject({ ok: true, revoked: false });
+
+    await persistSignalSnapshot(env, {
+      id: "stale-pack",
+      signalType: "contributor-decision-pack",
+      targetKey: "stale-user",
+      payload: {
+        status: "ready",
+        source: "computed",
+        login: "stale-user",
+        generatedAt: "2026-01-01T00:00:00.000Z",
+        stale: false,
+        scoringModelSnapshotId: "scoring-1",
+        profile: {},
+        outcomeHistory: {},
+        roleContexts: [],
+        repoDecisions: [],
+        topActions: [],
+        cleanupFirst: [],
+        pursueRepos: [],
+        avoidRepos: [],
+        maintainerLaneRepos: [],
+        scoreBlockers: [],
+        dataQuality: { signalFidelity: { status: "degraded" } },
+        summary: "stale",
+        nextActions: [],
+      } as never,
+      generatedAt: "2026-01-01T00:00:00.000Z",
+    });
+    const staleDecisionPack = await app.request("/v1/contributors/stale-user/decision-pack", { headers: apiHeaders(env) }, env);
+    expect(staleDecisionPack.status).toBe(202);
+    await expect(staleDecisionPack.json()).resolves.toMatchObject({
+      status: "needs_snapshot_refresh",
+      reason: "stale_snapshot",
+      staleSnapshot: { generatedAt: "2026-01-01T00:00:00.000Z" },
+      dataQuality: { signalFidelity: { status: "degraded" } },
+    });
+
+    await persistSignalSnapshot(env, {
+      id: "fresh-empty-pack",
+      signalType: "contributor-decision-pack",
+      targetKey: "fresh-user",
+      payload: {
+        status: "ready",
+        source: "computed",
+        login: "fresh-user",
+        generatedAt: new Date().toISOString(),
+        stale: false,
+        scoringModelSnapshotId: "scoring-1",
+        profile: {},
+        outcomeHistory: {},
+        roleContexts: [],
+        repoDecisions: [],
+        topActions: [],
+        cleanupFirst: [],
+        pursueRepos: [],
+        avoidRepos: [],
+        maintainerLaneRepos: [],
+        scoreBlockers: [],
+        dataQuality: { signalFidelity: { status: "complete" } },
+        summary: "fresh",
+        nextActions: [],
+      } as never,
+      generatedAt: new Date().toISOString(),
+    });
+    const missingRepoDecision = await app.request("/v1/contributors/fresh-user/repos/owner/repo/decision", { headers: apiHeaders(env) }, env);
+    expect(missingRepoDecision.status).toBe(404);
+
+    const invalidReviewability = await app.request("/v1/repos/owner/repo/pulls/not-a-number/reviewability", { headers: apiHeaders(env) }, env);
+    expect(invalidReviewability.status).toBe(400);
+    const noAuthorReviewability = await app.request("/v1/repos/owner/repo/pulls/123/reviewability", { headers: apiHeaders(env) }, env);
+    expect(noAuthorReviewability.status).toBe(200);
+    await expect(noAuthorReviewability.json()).resolves.toMatchObject({ action: "review_now" });
+
+    const backfillDefault = await app.request(
+      "/v1/internal/jobs/backfill-registered-repos",
+      { method: "POST", headers: { authorization: `Bearer ${env.INTERNAL_JOB_TOKEN}` }, body: JSON.stringify({ mode: "invalid" }) },
+      env,
+    );
+    expect(backfillDefault.status).toBe(202);
+    const backfillFullRun = await app.request(
+      "/v1/internal/jobs/backfill-registered-repos/run",
+      { method: "POST", headers: { authorization: `Bearer ${env.INTERNAL_JOB_TOKEN}` }, body: JSON.stringify({ mode: "full" }) },
+      env,
+    );
+    expect(backfillFullRun.status).toBe(200);
+    const missingSegmentRepo = await app.request("/v1/internal/jobs/backfill-repo-segment", { method: "POST", headers: { authorization: `Bearer ${env.INTERNAL_JOB_TOKEN}` }, body: JSON.stringify({}) }, env);
+    expect(missingSegmentRepo.status).toBe(400);
+    const invalidSegment = await app.request(
+      "/v1/internal/jobs/backfill-repo-segment/run",
+      { method: "POST", headers: { authorization: `Bearer ${env.INTERNAL_JOB_TOKEN}` }, body: JSON.stringify({ repoFullName: "owner/repo", segment: "bad" }) },
+      env,
+    );
+    expect(invalidSegment.status).toBe(400);
+    const queuedSegment = await app.request(
+      "/v1/internal/jobs/backfill-repo-segment",
+      { method: "POST", headers: { authorization: `Bearer ${env.INTERNAL_JOB_TOKEN}` }, body: JSON.stringify({ repoFullName: "owner/repo", segment: "labels", mode: "full", cursor: "2", force: true }) },
+      env,
+    );
+    expect(queuedSegment.status).toBe(202);
+    const queuedResumeSegment = await app.request(
+      "/v1/internal/jobs/backfill-repo-segment",
+      { method: "POST", headers: { authorization: `Bearer ${env.INTERNAL_JOB_TOKEN}` }, body: JSON.stringify({ repoFullName: "owner/repo", segment: "labels", mode: "resume" }) },
+      env,
+    );
+    expect(queuedResumeSegment.status).toBe(202);
+    const missingDetailsRepo = await app.request("/v1/internal/jobs/backfill-pr-details", { method: "POST", headers: { authorization: `Bearer ${env.INTERNAL_JOB_TOKEN}` }, body: JSON.stringify({}) }, env);
+    expect(missingDetailsRepo.status).toBe(400);
+    const queuedDetails = await app.request(
+      "/v1/internal/jobs/backfill-pr-details",
+      { method: "POST", headers: { authorization: `Bearer ${env.INTERNAL_JOB_TOKEN}` }, body: JSON.stringify({ repoFullName: "owner/repo", mode: "resume", cursor: "5" }) },
+      env,
+    );
+    expect(queuedDetails.status).toBe(202);
+    const queuedFullDetails = await app.request(
+      "/v1/internal/jobs/backfill-pr-details",
+      { method: "POST", headers: { authorization: `Bearer ${env.INTERNAL_JOB_TOKEN}` }, body: JSON.stringify({ repoFullName: "owner/repo", mode: "full" }) },
+      env,
+    );
+    expect(queuedFullDetails.status).toBe(202);
+    const evidenceAll = await app.request("/v1/internal/jobs/build-contributor-evidence", { method: "POST", headers: { authorization: `Bearer ${env.INTERNAL_JOB_TOKEN}` }, body: "{}" }, env);
+    expect(evidenceAll.status).toBe(202);
+    const packsAll = await app.request("/v1/internal/jobs/build-contributor-decision-packs", { method: "POST", headers: { authorization: `Bearer ${env.INTERNAL_JOB_TOKEN}` }, body: "{}" }, env);
+    expect(packsAll.status).toBe(202);
+    const missingActivityLogin = await app.request("/v1/internal/jobs/refresh-contributor-activity", { method: "POST", headers: { authorization: `Bearer ${env.INTERNAL_JOB_TOKEN}` }, body: "{}" }, env);
+    expect(missingActivityLogin.status).toBe(400);
+    const activityQueued = await app.request(
+      "/v1/internal/jobs/refresh-contributor-activity",
+      { method: "POST", headers: { authorization: `Bearer ${env.INTERNAL_JOB_TOKEN}` }, body: JSON.stringify({ login: "jsonbored", repoFullName: "owner/repo" }) },
+      env,
+    );
+    expect(activityQueued.status).toBe(202);
+    const burdenAll = await app.request("/v1/internal/jobs/build-burden-forecasts", { method: "POST", headers: { authorization: `Bearer ${env.INTERNAL_JOB_TOKEN}` }, body: "{}" }, env);
+    expect(burdenAll.status).toBe(202);
+    const signalsOne = await app.request(
+      "/v1/internal/jobs/generate-signal-snapshots",
+      { method: "POST", headers: { authorization: `Bearer ${env.INTERNAL_JOB_TOKEN}` }, body: JSON.stringify({ repoFullName: "owner/repo" }) },
+      env,
+    );
+    expect(signalsOne.status).toBe(202);
+    const invalidSettings = await app.request(
+      "/v1/internal/repos/owner/repo/settings",
+      { method: "POST", headers: { authorization: `Bearer ${env.INTERNAL_JOB_TOKEN}` }, body: JSON.stringify({ commentMode: "loud" }) },
+      env,
+    );
+    expect(invalidSettings.status).toBe(400);
+    expect(queued).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ type: "backfill-registered-repos", mode: "light" }),
+        expect.objectContaining({ type: "backfill-repo-segment", repoFullName: "owner/repo", segment: "labels", mode: "full", cursor: "2", force: true }),
+        expect.objectContaining({ type: "backfill-pr-details", repoFullName: "owner/repo", mode: "resume", cursor: 5 }),
+        expect.objectContaining({ type: "build-contributor-evidence", login: undefined }),
+        expect.objectContaining({ type: "build-contributor-decision-packs", login: undefined }),
+        expect.objectContaining({ type: "refresh-contributor-activity", login: "jsonbored", repoFullName: "owner/repo" }),
+        expect.objectContaining({ type: "build-burden-forecasts", repoFullName: undefined }),
+        expect.objectContaining({ type: "generate-signal-snapshots", repoFullName: "owner/repo" }),
+      ]),
+    );
+
+    await persistRegistrySnapshot(
+      env,
+      normalizeRegistryPayload(
+        {
+          "owner/excellent": { emission_share: 0.02, issue_discovery_share: 0, label_multipliers: {}, trusted_label_pipeline: false, maintainer_cut: 0 },
+          "owner/issue-only": { emission_share: 0.02, issue_discovery_share: 1, label_multipliers: {}, trusted_label_pipeline: false, maintainer_cut: 0 },
+          "owner/fragile": { emission_share: 0, issue_discovery_share: 0, label_multipliers: {}, trusted_label_pipeline: true, maintainer_cut: 0 },
+        },
+        { kind: "raw-github", url: "fixture://route-edge-registry" },
+        "2026-05-26T00:00:00.000Z",
+      ),
+    );
+    for (const fullName of ["owner/excellent", "owner/issue-only", "owner/fragile"]) {
+      const [, name] = fullName.split("/");
+      await upsertRepositoryFromGitHub(env, { name: name!, full_name: fullName, private: false, owner: { login: "owner" }, default_branch: "main" });
+    }
+    await persistRepoGithubTotalsSnapshot(env, {
+      id: "excellent-totals",
+      repoFullName: "owner/excellent",
+      openIssuesTotal: 0,
+      openPullRequestsTotal: 0,
+      mergedPullRequestsTotal: 0,
+      closedUnmergedPullRequestsTotal: 0,
+      labelsTotal: 0,
+      sourceKind: "github",
+      fetchedAt: "2026-05-26T00:00:00.000Z",
+      payload: {},
+    });
+    await persistRepoGithubTotalsSnapshot(env, {
+      id: "fragile-totals",
+      repoFullName: "owner/fragile",
+      openIssuesTotal: 500,
+      openPullRequestsTotal: 300,
+      mergedPullRequestsTotal: 0,
+      closedUnmergedPullRequestsTotal: 0,
+      labelsTotal: 0,
+      sourceKind: "github",
+      fetchedAt: "2026-05-26T00:00:00.000Z",
+      payload: {},
+    });
+    const excellentRecommendation = await app.request("/v1/repos/owner/excellent/gittensor-config-recommendation", { headers: apiHeaders(env) }, env);
+    expect(excellentRecommendation.status).toBe(200);
+    await expect(excellentRecommendation.json()).resolves.toMatchObject({
+      recommended: { participationMode: "split", issueDiscoveryShare: 0.1, maintainerCut: 0.02 },
+      reasons: expect.arrayContaining(["Config and intake signals are strong enough to consider a small issue-discovery slice.", "Maintainer cut can be considered because config and queue signals are clean."]),
+    });
+    const issueOnlyReadiness = await app.request("/v1/repos/owner/issue-only/registration-readiness", { headers: apiHeaders(env) }, env);
+    expect(issueOnlyReadiness.status).toBe(200);
+    await expect(issueOnlyReadiness.json()).resolves.toMatchObject({ recommendedRegistrationMode: "issue_discovery", issuePolicy: "issue_discovery_enabled" });
+    const fragileReadiness = await app.request("/v1/repos/owner/fragile/registration-readiness", { headers: apiHeaders(env) }, env);
+    expect(fragileReadiness.status).toBe(200);
+    await expect(fragileReadiness.json()).resolves.toMatchObject({
+      ready: false,
+      blockers: expect.arrayContaining(["Repository config quality is fragile.", "Contributor intake health is blocked."]),
+    });
+  });
+
   it("updates repository settings through protected internal API", async () => {
     const app = createApp();
     const env = createTestEnv();
@@ -1357,7 +1774,7 @@ async function seedSignalData(env: Env): Promise<void> {
       id: 123,
       account: { login: "entrius", id: 1, type: "Organization" },
       repository_selection: "selected",
-      permissions: { checks: "write", metadata: "read", pull_requests: "read" },
+      permissions: { metadata: "read", pull_requests: "read", issues: "write" },
       events: ["issues", "pull_request", "repository"],
     },
   });
@@ -1502,7 +1919,7 @@ async function seedSignalData(env: Env): Promise<void> {
     status: "healthy",
     missingPermissions: [],
     missingEvents: [],
-    permissions: { checks: "write", metadata: "read", pull_requests: "read", issues: "read" },
+    permissions: { metadata: "read", pull_requests: "read", issues: "write" },
     events: ["issues", "pull_request", "repository"],
     checkedAt: "2026-05-23T00:00:00.000Z",
   });

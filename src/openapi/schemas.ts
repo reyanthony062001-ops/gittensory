@@ -434,8 +434,14 @@ export const RepositorySettingsSchema = z
     repoFullName: z.string(),
     commentMode: z.enum(["off", "detected_contributors_only", "all_prs"]),
     publicSignalLevel: z.enum(["minimal", "standard"]),
-    checkRunMode: z.enum(["enabled"]),
+    checkRunMode: z.enum(["off", "enabled"]),
     checkRunDetailLevel: z.enum(["minimal", "standard", "deep"]),
+    autoLabelEnabled: z.boolean(),
+    gittensorLabel: z.string(),
+    createMissingLabel: z.boolean(),
+    publicSurface: z.enum(["off", "comment_and_label", "comment_only", "label_only"]),
+    includeMaintainerAuthors: z.boolean(),
+    requireLinkedIssue: z.boolean(),
     backfillEnabled: z.boolean(),
     privateTrustEnabled: z.boolean(),
     createdAt: z.string().nullable().optional(),
@@ -1019,6 +1025,36 @@ export const RepoIntelligenceSchema = z
     dataQuality: z.record(z.unknown()),
   })
   .openapi("RepoIntelligence");
+
+export const RegistrationReadinessSchema = z
+  .object({
+    repoFullName: z.string(),
+    generatedAt: z.string(),
+    ready: z.boolean(),
+    recommendedRegistrationMode: z.enum(["direct_pr", "issue_discovery", "split"]),
+    issuePolicy: z.enum(["issue_discovery_enabled", "split_pr_and_issue_discovery_enabled", "direct_pr_requires_linked_issue", "direct_pr_no_issue_required"]),
+    labelPolicy: z.record(z.unknown()),
+    maintainerCutReadiness: z.record(z.unknown()),
+    contributorIntakeHealth: z.record(z.unknown()),
+    docsCompleteness: z.record(z.unknown()),
+    blockers: z.array(z.string()),
+    warnings: z.array(z.string()),
+    dataQuality: z.record(z.unknown()),
+  })
+  .openapi("RegistrationReadiness");
+
+export const GittensorConfigRecommendationSchema = z
+  .object({
+    repoFullName: z.string(),
+    generatedAt: z.string(),
+    privateOnly: z.boolean(),
+    current: z.record(z.unknown()).nullable(),
+    recommended: z.record(z.unknown()),
+    reasons: z.array(z.string()),
+    warnings: z.array(z.string()),
+    dataQuality: z.record(z.unknown()),
+  })
+  .openapi("GittensorConfigRecommendation");
 
 export const RewardRiskActionSchema = z
   .object({

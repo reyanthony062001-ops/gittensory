@@ -51,7 +51,7 @@ import type {
   RepoSyncStateRecord,
   RepositoryRecord,
 } from "../types";
-import { nowIso, repoParts } from "../utils/json";
+import { errorMessage, nowIso, repoParts, strippedErrorMessage } from "../utils/json";
 import { createInstallationToken, getAppInstallation } from "./app";
 
 type GitHubLabelPayload = {
@@ -519,7 +519,7 @@ export async function refreshContributorActivity(
     try {
       payload = await githubGraphQl<GitHubGraphQlContributorSearchResponse>(env, query, token);
     } catch (error) {
-      warnings.push(`Contributor activity refresh failed for ${chunk.map((repo) => repo.fullName).join(", ")}: ${error instanceof Error ? error.message : "unknown error"}`);
+      warnings.push(`Contributor activity refresh failed for ${chunk.map((repo) => repo.fullName).join(", ")}: ${errorMessage(error)}`);
       continue;
     }
     if (payload.errors?.length) {
@@ -577,10 +577,12 @@ export async function refreshContributorActivity(
 }
 
 export const REQUIRED_INSTALLATION_PERMISSIONS: Record<string, string> = {
-  checks: "write",
   metadata: "read",
   pull_requests: "read",
-  issues: "read",
+  issues: "write",
+};
+export const OPTIONAL_CHECK_RUN_PERMISSION: Record<string, string> = {
+  checks: "write",
 };
 
 export const REQUIRED_INSTALLATION_EVENTS = ["issues", "pull_request", "repository"] as const;
@@ -589,12 +591,17 @@ export const OPTIONAL_VISIBLE_INSTALLATION_EVENTS = ["installation_target"] as c
 export function enrichInstallationHealth(health: InstallationHealthRecord) {
   const missingPermissions = new Set(health.missingPermissions);
   const missingEvents = new Set(health.missingEvents);
+  const requiredPermissions = {
+    ...REQUIRED_INSTALLATION_PERMISSIONS,
+    ...(missingPermissions.has("checks") ? OPTIONAL_CHECK_RUN_PERMISSION : {}),
+  };
   return {
     ...health,
-    requiredPermissions: REQUIRED_INSTALLATION_PERMISSIONS,
+    requiredPermissions,
+    optionalPermissions: OPTIONAL_CHECK_RUN_PERMISSION,
     requiredEvents: [...REQUIRED_INSTALLATION_EVENTS],
     optionalVisibleEvents: [...OPTIONAL_VISIBLE_INSTALLATION_EVENTS],
-    permissionRemediation: Object.entries(REQUIRED_INSTALLATION_PERMISSIONS).map(([permission, access]) => ({
+    permissionRemediation: Object.entries(requiredPermissions).map(([permission, access]) => ({
       permission,
       requiredAccess: access,
       currentAccess: health.permissions[permission] ?? "missing",
@@ -625,7 +632,13 @@ export async function refreshInstallationHealth(env: Env) {
     const { installation: currentInstallation, errorSummary } = await refreshStoredInstallation(env, installation);
     const installedRepos = repositories.filter((repo) => repo.installationId === currentInstallation.id && repo.isInstalled);
     const registeredInstalled = installedRepos.filter((repo) => repo.isRegistered);
-    const missingPermissions = Object.entries(REQUIRED_INSTALLATION_PERMISSIONS)
+    const installedSettings = await Promise.all(installedRepos.map((repo) => getRepositorySettings(env, repo.fullName)));
+    const requiresChecks = installedSettings.some((settings) => settings.checkRunMode === "enabled");
+    const requiredPermissions = {
+      ...REQUIRED_INSTALLATION_PERMISSIONS,
+      ...(requiresChecks ? OPTIONAL_CHECK_RUN_PERMISSION : {}),
+    };
+    const missingPermissions = Object.entries(requiredPermissions)
       .filter(([permission, expected]) => !permissionSatisfies(currentInstallation.permissions[permission], expected))
       .map(([permission]) => permission);
     const missingEvents = REQUIRED_INSTALLATION_EVENTS.filter((event) => !currentInstallation.events.includes(event));
@@ -670,7 +683,7 @@ async function refreshStoredInstallation(env: Env, installation: InstallationRec
   } catch (error) {
     return {
       installation,
-      errorSummary: String(error).replace(/^Error: /, "") || "Failed to refresh GitHub App installation metadata.",
+      errorSummary: strippedErrorMessage(error, "Failed to refresh GitHub App installation metadata."),
     };
   }
 }
@@ -917,7 +930,7 @@ async function fetchPagedSegment<T>(
       warnings.push(`GitHub sync is waiting for rate-limit recovery for ${path}: ${error.message}`);
     } else {
       status = fetchedThisRun > 0 ? "partial" : "error";
-      warnings.push(`GitHub sync failed for ${path}: ${error instanceof Error ? error.message : "unknown error"}`);
+      warnings.push(`GitHub sync failed for ${path}: ${errorMessage(error)}`);
     }
   }
   let fetchedCount = options.countPersisted ? await options.countPersisted() : priorFetched + fetchedThisRun;
@@ -975,7 +988,7 @@ async function supplementUnderCountIfNeeded(
     if (supplemented > 0) warnings.push(`Supplemented ${supplemented} open issue row(s) from GitHub GraphQL because REST open issue pagination undercounted the authoritative total.`);
     return options.countPersisted ? await options.countPersisted() : fetchedCount + supplemented;
   } catch (error) {
-    warnings.push(`GitHub GraphQL supplement failed after REST undercount: ${error instanceof Error ? error.message : "unknown error"}`);
+    warnings.push(`GitHub GraphQL supplement failed after REST undercount: ${errorMessage(error)}`);
     return fetchedCount;
   }
 }
@@ -1275,7 +1288,7 @@ async function backfillRepository(env: Env, repo: RepositoryRecord, limits: Back
       dataQuality,
     };
   } catch (error) {
-    const errorSummary = error instanceof Error ? error.message : "unknown error";
+    const errorSummary = errorMessage(error);
     const rateLimitResetAt = error instanceof GitHubApiError ? error.rateLimitResetAt : undefined;
     const status = error instanceof GitHubApiError && error.rateLimited ? "rate_limited" : "error";
     await completeSegment(env, repo, "metadata", repo.installationId ? "installation" : "github", mode, startedAt, {
@@ -1324,12 +1337,12 @@ async function fetchAndStorePullRequestDetails(
   const [files, reviews, checks] = await Promise.all([
     fetchPullRequestFiles(env, repoFullName, pr.number, token, warnings),
     githubJson<GitHubReviewPayload[]>(env, repoFullName, `/pulls/${pr.number}/reviews?per_page=100`, token).catch((error) => {
-      warnings.push(`Review sync failed for #${pr.number}: ${error instanceof Error ? error.message : "unknown error"}`);
+      warnings.push(`Review sync failed for #${pr.number}: ${errorMessage(error)}`);
       return [];
     }),
     pr.headSha
       ? githubJson<{ check_runs?: GitHubCheckRunPayload[] }>(env, repoFullName, `/commits/${pr.headSha}/check-runs?per_page=100`, token).catch((error) => {
-          warnings.push(`Check sync failed for #${pr.number}: ${error instanceof Error ? error.message : "unknown error"}`);
+          warnings.push(`Check sync failed for #${pr.number}: ${errorMessage(error)}`);
           return { check_runs: [] };
         })
       : Promise.resolve({ check_runs: [] }),
@@ -1385,7 +1398,7 @@ async function fetchPullRequestFiles(
   warnings: string[],
 ): Promise<GitHubFilePayload[]> {
   return githubJson<GitHubFilePayload[]>(env, repoFullName, `/pulls/${pullNumber}/files?per_page=100`, token).catch((error) => {
-    warnings.push(`File sync failed for #${pullNumber}: ${error instanceof Error ? error.message : "unknown error"}`);
+    warnings.push(`File sync failed for #${pullNumber}: ${errorMessage(error)}`);
     return [];
   });
 }
@@ -1469,7 +1482,7 @@ async function syncLabels(
     });
     return { items, warnings: [], segment };
   } catch (error) {
-    const warning = `Label sync failed: ${error instanceof Error ? error.message : "unknown error"}`;
+    const warning = `Label sync failed: ${errorMessage(error)}`;
     const segment = await completeSegment(env, repo, "labels", sourceKind, mode, startedAt, {
       status: error instanceof GitHubApiError && error.rateLimited ? "rate_limited" : "partial",
       fetchedCount: 0,
@@ -1528,7 +1541,7 @@ async function githubPaged<T>(
   } catch (error) {
     status = error instanceof GitHubApiError && error.rateLimited ? "rate_limited" : items.length > 0 ? "partial" : "error";
     rateLimitResetAt = error instanceof GitHubApiError ? error.rateLimitResetAt : undefined;
-    warnings.push(`GitHub sync failed for ${path}: ${error instanceof Error ? error.message : "unknown error"}`);
+    warnings.push(`GitHub sync failed for ${path}: ${errorMessage(error)}`);
   }
 
   if (status === "complete" && items.length >= limit && limit > 0) {
