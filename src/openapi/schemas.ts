@@ -1022,6 +1022,8 @@ export const ContributorStrategySchema = z
   })
   .openapi("ContributorStrategy");
 
+export const DecisionPackFreshnessSchema = z.enum(["fresh", "stale", "rebuilding", "missing"]).openapi("DecisionPackFreshness");
+
 export const ContributorDecisionPackSchema = z
   .object({
     status: z.enum(["ready"]),
@@ -1030,6 +1032,8 @@ export const ContributorDecisionPackSchema = z
     generatedAt: z.string(),
     snapshotAgeSeconds: z.number().optional(),
     stale: z.boolean(),
+    freshness: DecisionPackFreshnessSchema,
+    rebuildEnqueued: z.boolean(),
     scoringModelSnapshotId: z.string(),
     profile: z.record(z.unknown()),
     outcomeHistory: ContributorOutcomeHistorySchema,
@@ -1053,10 +1057,9 @@ export const DecisionPackRefreshNeededSchema = z
     login: z.string(),
     repoFullName: z.string().optional(),
     generatedAt: z.string(),
-    reason: z.enum(["missing_snapshot", "stale_snapshot"]),
-    enqueued: z.boolean(),
-    staleSnapshot: z.object({ generatedAt: z.string(), ageSeconds: z.number() }).optional(),
-    dataQuality: z.record(z.unknown()).optional(),
+    reason: z.enum(["missing_snapshot"]),
+    freshness: z.enum(["missing"]),
+    rebuildEnqueued: z.boolean(),
   })
   .openapi("DecisionPackRefreshNeeded");
 
@@ -1067,6 +1070,8 @@ export const RepoDecisionResponseSchema = z
     repoFullName: z.string(),
     generatedAt: z.string(),
     source: z.enum(["computed", "snapshot"]),
+    freshness: DecisionPackFreshnessSchema,
+    rebuildEnqueued: z.boolean(),
     decision: z.record(z.unknown()),
     dataQuality: z.record(z.unknown()),
   })

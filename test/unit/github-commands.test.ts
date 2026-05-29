@@ -73,7 +73,7 @@ describe("GitHub mention commands", () => {
           mode: "copilot",
           status: "completed",
           dataQualityStatus: "complete",
-          payload: {},
+          payload: { freshness: "rebuilding", rebuildEnqueued: true },
         },
         actions: [
           {
@@ -96,6 +96,8 @@ describe("GitHub mention commands", () => {
     });
     expect(body).toContain("<!-- gittensory-agent-command -->");
     expect(body).toContain("Scope: this repository#12");
+    expect(body).not.toContain("Decision snapshot is stale");
+    expect(body).not.toContain("background rebuild");
     expect(body).not.toMatch(/wallet|hotkey|coldkey|estimated score|reward estimate|payout|farming|raw trust score|reviewability|private ranking/i);
     expect(body).not.toMatch(/private context,\s*private context/i);
     expect(sanitizePublicComment("wallet hotkey payout reviewability private ranking")).not.toMatch(
@@ -211,6 +213,30 @@ describe("GitHub mention commands", () => {
       },
     });
     expect(refresh).toContain("**Blocker snapshot refresh**");
+
+    const duplicateRefresh = buildPublicAgentCommandComment({
+      command: parseGittensoryMentionCommand("@gittensory duplicate-check")!,
+      repo: null,
+      issue: { number: 33, title: "PR", state: "open", pull_request: {} },
+      pullRequest: null,
+      actorKind: "author",
+      bundle: {
+        run: {
+          id: "run-duplicate-refresh",
+          objective: "refresh",
+          actorLogin: "oktofeesh1",
+          surface: "github_comment",
+          mode: "copilot",
+          status: "needs_snapshot_refresh",
+          dataQualityStatus: "unknown",
+          payload: {},
+        },
+        actions: [],
+        contextSnapshots: [],
+        summary: "refresh",
+      },
+    });
+    expect(duplicateRefresh).toContain("**Duplicate-check snapshot refresh**");
 
     const empty = buildPublicAgentCommandComment({
       command: parseGittensoryMentionCommand("@gittensory next-action")!,
