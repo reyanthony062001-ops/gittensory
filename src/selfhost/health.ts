@@ -7,6 +7,42 @@ export interface Readiness {
   checks: Record<string, boolean>;
 }
 
+export type HealthBackend = "sqlite" | "postgres";
+
+export interface HealthBody {
+  status: "ok";
+  version: string;
+  uptimeSeconds: number;
+  backend: HealthBackend;
+}
+
+function nonBlank(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+export function resolveHealthVersion(
+  env: { GITTENSORY_VERSION?: string | undefined },
+  packageVersion?: string,
+): string {
+  const envVersion = nonBlank(env.GITTENSORY_VERSION);
+  if (envVersion) return envVersion;
+  return nonBlank(packageVersion) ?? "unknown";
+}
+
+export function buildHealthBody(opts: {
+  version?: string;
+  startedAt: number;
+  dbBackend: HealthBackend;
+}): HealthBody {
+  return {
+    status: "ok",
+    version: nonBlank(opts.version) ?? "unknown",
+    uptimeSeconds: Math.max(0, Math.floor((Date.now() - opts.startedAt) / 1000)),
+    backend: opts.dbBackend,
+  };
+}
+
 /** An extra readiness check for a CONFIGURED optional backend (Redis, Qdrant …). `check` resolves true when the
  *  backend is reachable; it OWNS its own timeout (the caller wires it that way) so a hung backend can't hang /ready.
  *  A configured backend that fails to answer means the instance is degraded — a multi-instance load balancer should
@@ -27,8 +63,8 @@ export async function readiness(db: D1Database, probes: ReadinessProbe[] = []): 
   }
   try {
     const row = await db.prepare("SELECT COUNT(*) AS c FROM _selfhost_migrations").first<{ c: number }>();
-    /* v8 ignore next */ // COUNT(*) always returns exactly one row, so the row?./?? 0 guards never fire
-    migrations = Number(row?.c ?? 0) > 0;
+    // COUNT(*) always returns one row on D1/SQLite; if an adapter violates that, this try/catch fails closed.
+    migrations = Number(row!.c) > 0;
   } catch {
     /* migrations table missing */
   }
