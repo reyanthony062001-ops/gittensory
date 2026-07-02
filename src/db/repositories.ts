@@ -1152,6 +1152,7 @@ export async function upsertPullRequestDetailSyncState(env: Env, state: PullRequ
       headSha: state.headSha,
       filesSyncedAt: state.filesSyncedAt,
       reviewsSyncedAt: state.reviewsSyncedAt,
+      reviewsInvalidatedAt: state.reviewsInvalidatedAt,
       checksSyncedAt: state.checksSyncedAt,
       lastSyncedAt: state.lastSyncedAt,
       errorSummary: state.errorSummary,
@@ -1164,12 +1165,57 @@ export async function upsertPullRequestDetailSyncState(env: Env, state: PullRequ
         headSha: state.headSha,
         filesSyncedAt: state.filesSyncedAt,
         reviewsSyncedAt: state.reviewsSyncedAt,
+        reviewsInvalidatedAt: state.reviewsInvalidatedAt,
         checksSyncedAt: state.checksSyncedAt,
         lastSyncedAt: state.lastSyncedAt,
         errorSummary: state.errorSummary,
         updatedAt: nowIso(),
       },
     });
+}
+
+/** Reviews-cache invalidation stamp (#2537): a pure single-field bump of `reviewsInvalidatedAt`, leaving
+ *  every other column (`headSha`/`filesSyncedAt`/`reviewsSyncedAt`/`checksSyncedAt`/...) untouched when the
+ *  row already exists — mirrors the narrow single-field touches on `pull_requests` (markPullRequestApproved,
+ *  markPullRequestRegated). Creates the row (all other columns default/NULL) if this repo+PR has never been
+ *  synced yet, so an early review webhook is not silently dropped.
+ *
+ *  Unlike its siblings above (advisory/reporting markers with other fallback signals), this write is the SOLE
+ *  source of the reviews-cache invalidation signal (#2537 gate finding) — a single failed attempt loses that
+ *  PR's specific "reviews changed" event permanently, with nothing to naturally re-trigger it until some LATER
+ *  invalidation happens to succeed. The caller already treats this as best-effort (never blocks the webhook),
+ *  so a short bounded retry absorbs a transient D1 blip in-process rather than needing a durable retry queue
+ *  for what is still, even after this, a best-effort write. */
+export async function markPullRequestReviewsInvalidated(env: Env, repoFullName: string, pullNumber: number): Promise<void> {
+  const db = getDb(env.DB);
+  const now = nowIso();
+  const MAX_ATTEMPTS = 3;
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    try {
+      await db
+        .insert(pullRequestDetailSyncState)
+        .values({
+          id: `${repoFullName}#${pullNumber}`,
+          repoFullName,
+          pullNumber,
+          status: "never_synced",
+          reviewsInvalidatedAt: now,
+          updatedAt: now,
+        })
+        .onConflictDoUpdate({
+          target: [pullRequestDetailSyncState.repoFullName, pullRequestDetailSyncState.pullNumber],
+          set: {
+            reviewsInvalidatedAt: now,
+            updatedAt: now,
+          },
+        });
+      return;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
 }
 
 export async function getPullRequestDetailSyncState(env: Env, fullName: string, pullNumber: number): Promise<PullRequestDetailSyncStateRecord | null> {
@@ -4226,6 +4272,7 @@ function toPullRequestDetailSyncStateRecord(row: typeof pullRequestDetailSyncSta
     headSha: row.headSha,
     filesSyncedAt: row.filesSyncedAt,
     reviewsSyncedAt: row.reviewsSyncedAt,
+    reviewsInvalidatedAt: row.reviewsInvalidatedAt,
     checksSyncedAt: row.checksSyncedAt,
     lastSyncedAt: row.lastSyncedAt,
     errorSummary: row.errorSummary,
