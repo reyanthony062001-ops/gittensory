@@ -109,6 +109,7 @@ export function initPortfolioQueueStore(dbPath = resolvePortfolioQueueDbPath()) 
     ON CONFLICT(repo_full_name, identifier) DO UPDATE SET
       priority = excluded.priority,
       status = 'queued'
+    WHERE miner_portfolio_queue.status <> 'in_progress'
   `);
   const getStatement = db.prepare(
     "SELECT * FROM miner_portfolio_queue WHERE repo_full_name = ? AND identifier = ?",

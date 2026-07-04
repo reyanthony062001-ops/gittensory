@@ -108,6 +108,17 @@ describe("gittensory-miner portfolio/queue store (#2292)", () => {
     expect(store.dequeueNext()?.identifier).toBe("1"); // re-queued → dequeuable again
   });
 
+  it("re-enqueue does not demote an in-progress item back to queued", () => {
+    const store = tempStore();
+    store.enqueue({ repoFullName: "o/a", identifier: "work", priority: 1 });
+    expect(store.dequeueNext()).toMatchObject({ identifier: "work", status: "in_progress", priority: 1 });
+    expect(store.enqueue({ repoFullName: "o/a", identifier: "work", priority: 99 })).toMatchObject({
+      identifier: "work",
+      status: "in_progress",
+      priority: 1,
+    });
+  });
+
   it("re-enqueue keeps an item's FIFO position (no queue-jumping) even when timestamps collide", () => {
     // Freeze the clock so A and B share an enqueued_at — the case where a restamp-vs-rowid inconsistency would show.
     vi.useFakeTimers();
