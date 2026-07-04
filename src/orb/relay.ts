@@ -60,6 +60,10 @@ function logRelayTransientSkip(args: {
   installationId: number;
   phase: "initial" | "retry";
 }): void {
+  const message =
+    args.phase === "initial"
+      ? "Forwardable relay event skipped due to transient config — queued for retry cron"
+      : "Forwardable relay event skipped due to transient config — retained in retry cron with backoff";
   console.warn(
     JSON.stringify({
       level: "warn",
@@ -68,7 +72,7 @@ function logRelayTransientSkip(args: {
       deliveryId: args.deliveryId,
       eventName: args.eventName,
       installationId: args.installationId,
-      message: "Forwardable relay event skipped due to transient config — queued for retry cron",
+      message,
     }),
   );
 }
@@ -80,6 +84,12 @@ export async function persistRelayForwardOutcome(
   outcome: RelayForwardOutcome,
 ): Promise<void> {
   if (!shouldPersistRelayFailure(outcome, args.eventName, args.installationId)) return;
+  await storeRelayFailure(env, {
+    deliveryId: args.deliveryId,
+    eventName: args.eventName,
+    installationId: args.installationId!,
+    rawBody: args.rawBody,
+  });
   if (outcome === "skipped" && args.installationId != null) {
     logRelayTransientSkip({
       deliveryId: args.deliveryId,
@@ -88,12 +98,6 @@ export async function persistRelayForwardOutcome(
       phase: "initial",
     });
   }
-  await storeRelayFailure(env, {
-    deliveryId: args.deliveryId,
-    eventName: args.eventName,
-    installationId: args.installationId!,
-    rawBody: args.rawBody,
-  });
 }
 
 async function finalizeRelayFailureRetryRow(
@@ -105,6 +109,10 @@ async function finalizeRelayFailureRetryRow(
     await env.DB.prepare("DELETE FROM orb_relay_failures WHERE delivery_id = ?").bind(row.delivery_id).run();
     return;
   }
+  await env.DB
+    .prepare("UPDATE orb_relay_failures SET attempts = attempts + 1, last_attempt_at = datetime('now') WHERE delivery_id = ?")
+    .bind(row.delivery_id)
+    .run();
   if (outcome === "skipped") {
     logRelayTransientSkip({
       deliveryId: row.delivery_id,
@@ -113,10 +121,6 @@ async function finalizeRelayFailureRetryRow(
       phase: "retry",
     });
   }
-  await env.DB
-    .prepare("UPDATE orb_relay_failures SET attempts = attempts + 1, last_attempt_at = datetime('now') WHERE delivery_id = ?")
-    .bind(row.delivery_id)
-    .run();
 }
 
 /** HMAC-SHA256 hex over the raw event body — the relay signature BOTH sides compute (the Orb with the decrypted

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { createApp } from "../../src/api/routes";
 import { issueOrbEnrollment } from "../../src/orb/broker";
 import { relayForward } from "../../src/orb/webhook";
@@ -12,6 +12,10 @@ const seedInstall = (e: Env, id: number, cols: Record<string, string | number | 
   return db(e).prepare(`INSERT INTO orb_github_installations (${keys.join(", ")}) VALUES (${keys.map(() => "?").join(", ")})`).bind(...keys.map((k) => all[k] as string | number | null)).run();
 };
 const brokeredEnv = () => createTestEnv({ ORB_BROKER_ENABLED: "true", TOKEN_ENCRYPTION_SECRET: "test-encryption-key-material-0001" });
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 const enroll = async (e: Env, id: number): Promise<string> => {
   await seedInstall(e, id);
   return ((await issueOrbEnrollment(e, id)) as { secret: string }).secret;
@@ -247,7 +251,6 @@ describe("relayForward (deferred forward + failure persistence, #orb-ack-fast)",
     const row = await db(e).prepare("SELECT installation_id, event_name FROM orb_relay_failures WHERE delivery_id='rf-skip'").first<{ installation_id: number; event_name: string }>();
     expect(row).toMatchObject({ installation_id: 821, event_name: "pull_request" });
     expect(warnLog.mock.calls.some(([line]) => String(line).includes("orb_relay_transient_skip") && String(line).includes('"phase":"initial"'))).toBe(true);
-    warnLog.mockRestore();
   });
 
   it("does NOT persist permanently non-forwardable skips (check_run)", async () => {
@@ -401,7 +404,6 @@ describe("retryFailedRelays", () => {
     expect(row?.attempts).toBe(1); // transient skip must not delete the row — backoff and retry
     expect(row?.last_attempt_at).toBeTruthy(); // follows normal retry bookkeeping, not a silent delete
     expect(warnLog.mock.calls.some(([line]) => String(line).includes("orb_relay_transient_skip") && String(line).includes('"phase":"retry"'))).toBe(true);
-    warnLog.mockRestore();
   });
 
   it("KEEPS retrying when the encryption secret is temporarily missing", async () => {
@@ -455,7 +457,6 @@ describe("retryFailedRelays", () => {
     expect(row ?? null).toBeNull(); // pruned on the DELETE pass before the SELECT
     // The drop is no longer silent OR warn-only — an alertable level:error log reaches the Sentry forwarder.
     expect(errLog.mock.calls.some(([line]) => String(line).includes("orb_relay_events_dropped") && String(line).includes('"level":"error"'))).toBe(true);
-    errLog.mockRestore();
   });
 
   it("PRUNES expired rows (expires_at in the past) without attempting to forward", async () => {
@@ -773,7 +774,6 @@ describe("pullRelayPending", () => {
     expect(stale ?? null).toBeNull();
     // Pull-mode loss is now traced for the operator at error level (parity with the push-path drop).
     expect(errLog.mock.calls.some(([line]) => String(line).includes("orb_relay_pending_dropped") && String(line).includes('"level":"error"'))).toBe(true);
-    errLog.mockRestore();
   });
 });
 
