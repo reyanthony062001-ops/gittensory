@@ -3177,27 +3177,36 @@ export function createApp() {
     const auth = c.req.header("authorization") ?? "";
     const secret = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
     if (!secret) return c.json({ error: "missing_enrollment_secret" }, 401);
-    const rawBody = await readOrbRelayRegisterBody(c.req.raw, c.req.header("content-length"));
-    if (rawBody === null) return c.json({ error: "payload_too_large", maxBytes: MAX_ORB_RELAY_REGISTER_BODY_BYTES }, 413);
-    let body: unknown = null;
-    if (rawBody) {
-      try {
-        body = JSON.parse(rawBody) as unknown;
-      } catch {
-        body = null;
-      }
-    }
-    const forceRefresh = typeof body === "object" && body !== null && (body as { forceRefresh?: unknown }).forceRefresh === true;
-    let result: Awaited<ReturnType<typeof brokerOrbToken>>;
+    // Outer catch: readOrbRelayRegisterBody (stream reader) and brokerOrbToken's internal DB/hash calls can all
+    // throw on I/O errors. Without this, any unhandled throw escapes to the framework and produces a raw 500
+    // instead of a structured 503, which the client reports as orb_broker_unavailable (500).
     try {
-      result = await brokerOrbToken(c.env, secret, { forceRefresh });
+      const rawBody = await readOrbRelayRegisterBody(c.req.raw, c.req.header("content-length"));
+      if (rawBody === null) return c.json({ error: "payload_too_large", maxBytes: MAX_ORB_RELAY_REGISTER_BODY_BYTES }, 413);
+      let body: unknown = null;
+      if (rawBody) {
+        try {
+          body = JSON.parse(rawBody) as unknown;
+        } catch {
+          body = null;
+        }
+      }
+      const forceRefresh = typeof body === "object" && body !== null && (body as { forceRefresh?: unknown }).forceRefresh === true;
+      let result: Awaited<ReturnType<typeof brokerOrbToken>>;
+      try {
+        result = await brokerOrbToken(c.env, secret, { forceRefresh });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.error(JSON.stringify({ level: "error", event: "orb_broker_mint_failed", message: message.slice(0, 200) }));
+        return c.json({ error: "broker_error" }, 503);
+      }
+      if ("error" in result) return c.json(result, result.error === "invalid_enrollment" ? 401 : result.error === "broker_misconfigured" ? 503 : 403);
+      return c.json(result);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      console.error(JSON.stringify({ level: "error", event: "orb_broker_mint_failed", message: message.slice(0, 200) }));
+      console.error(JSON.stringify({ level: "error", event: "orb_broker_request_failed", message: message.slice(0, 200) }));
       return c.json({ error: "broker_error" }, 503);
     }
-    if ("error" in result) return c.json(result, result.error === "invalid_enrollment" ? 401 : result.error === "broker_misconfigured" ? 503 : 403);
-    return c.json(result);
   });
 
   // Orb event relay (#1255) — a brokered self-host registers its public relay URL so the Orb can forward its
@@ -3239,19 +3248,27 @@ export function createApp() {
     const auth = c.req.header("authorization") ?? "";
     const secret = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
     if (!secret) return c.json({ error: "missing_enrollment_secret" }, 401);
-    const enrollment = await validateOrbRelayEnrollment(c.env, secret);
-    if ("error" in enrollment) return c.json(enrollment, enrollment.error === "invalid_enrollment" ? 401 : 403);
-    const rawBody = await readOrbRelayRegisterBody(c.req.raw, c.req.header("content-length"));
-    if (rawBody === null) return c.json({ error: "payload_too_large" }, 413);
-    let ack: string[] | undefined;
+    // Outer catch: validateOrbRelayEnrollment, readOrbRelayRegisterBody (stream reader), and pullRelayPending can
+    // all throw on I/O errors, producing a raw 500 from the framework instead of a structured error response.
     try {
-      const body = rawBody ? (JSON.parse(rawBody) as { ack?: unknown }) : null;
-      if (Array.isArray(body?.ack)) ack = body.ack.filter((id): id is string => typeof id === "string");
-    } catch {
-      ack = undefined; // tolerate an empty/invalid body — just no ack this round
+      const enrollment = await validateOrbRelayEnrollment(c.env, secret);
+      if ("error" in enrollment) return c.json(enrollment, enrollment.error === "invalid_enrollment" ? 401 : 403);
+      const rawBody = await readOrbRelayRegisterBody(c.req.raw, c.req.header("content-length"));
+      if (rawBody === null) return c.json({ error: "payload_too_large" }, 413);
+      let ack: string[] | undefined;
+      try {
+        const body = rawBody ? (JSON.parse(rawBody) as { ack?: unknown }) : null;
+        if (Array.isArray(body?.ack)) ack = body.ack.filter((id): id is string => typeof id === "string");
+      } catch {
+        ack = undefined; // tolerate an empty/invalid body — just no ack this round
+      }
+      const events = await pullRelayPending(c.env, enrollment.installationId, { ack });
+      return c.json({ events }, 200);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error(JSON.stringify({ level: "error", event: "orb_relay_pull_failed", message: message.slice(0, 200) }));
+      return c.json({ error: "relay_error" }, 503);
     }
-    const events = await pullRelayPending(c.env, enrollment.installationId, { ack });
-    return c.json({ events }, 200);
   });
 
   // Gittensory Orb (#1255) — central fleet-calibration collector. Receives anonymized, reversal-aware outcome
