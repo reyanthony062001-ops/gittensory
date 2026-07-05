@@ -319,12 +319,11 @@ export function resolveCodexAuthPath(env: Record<string, string | undefined>): s
   return `${base}${sep}auth.json`;
 }
 
-/** Throws `codex_auth_not_configured` if codex's auth.json does not exist or is unreadable.
- *  Called before spawning the codex subprocess so the error message is immediately actionable
- *  ("run `codex auth`") rather than the cryptic `codex_exit_1: Reading prompt from stdin...`
- *  that surfaces when the CLI silently fails without credentials. */
+/** Throws `codex_auth_not_configured` if codex's auth.json does not exist or is unreadable,
+ *  or `codex_no_auth` if the token inside is expired. Called before spawning the codex subprocess
+ *  so the error is immediately actionable rather than a cryptic 10-minute timeout. */
 async function assertCodexAuthConfigured(env: Record<string, string | undefined>): Promise<void> {
-  const { access, constants } = await import("node:fs/promises");
+  const { access, readFile, constants } = await import("node:fs/promises");
   const authPath = resolveCodexAuthPath(env);
   try {
     await access(authPath, constants.R_OK);
@@ -332,6 +331,25 @@ async function assertCodexAuthConfigured(env: Record<string, string | undefined>
     throw new Error(
       `codex_auth_not_configured: ${authPath} not found or unreadable — run \`codex auth\` to authenticate, then restart the container`,
     );
+  }
+  // Also validate that the stored token is not expired so we surface a fast, actionable error
+  // instead of spawning codex and waiting the full timeout for it to hang on stdin.
+  try {
+    const raw = await readFile(authPath, "utf8");
+    const parsed = JSON.parse(raw) as Record<string, unknown>;
+    const expiresAt = parsed.expires_at ?? parsed.expiresAt ?? parsed.expiry;
+    if (typeof expiresAt === "number" && expiresAt * 1000 < Date.now()) {
+      throw new Error("codex_no_auth: auth.json token expired — re-run `codex auth` and restart");
+    }
+    if (typeof expiresAt === "string") {
+      const ms = Date.parse(expiresAt);
+      if (!Number.isNaN(ms) && ms < Date.now()) {
+        throw new Error("codex_no_auth: auth.json token expired — re-run `codex auth` and restart");
+      }
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message.startsWith("codex_no_auth")) throw error;
+    // Ignore JSON parse errors or unexpected shapes — let codex itself report those.
   }
 }
 
@@ -716,7 +734,15 @@ export function createCodexAi(
         stdoutForMetrics = stdout;
         if (timedOut) {
           // Include whatever the JSONL stream captured before the kill — codex writes errors there, not to stderr.
-          const detail = codexErrorFromStdout(stdout) ?? (redactSecrets(stderr ?? "").slice(0, 200) || "no output");
+          const jsonlDetail = codexErrorFromStdout(stdout);
+          const stderrTrimmed = (stderr ?? "").trim();
+          if (!jsonlDetail && stderrTrimmed === "Reading prompt from stdin...") {
+            // Codex hung waiting for stdin the entire timeout — auth.json was present at spawn time but
+            // the token expired mid-flight (or auth.json was removed). Surface the same distinct error
+            // as the non-zero-exit path so Sentry groups it separately from genuine timeout failures.
+            throw new Error("codex_no_auth: auth.json missing or expired — re-run `codex auth` and restart");
+          }
+          const detail = jsonlDetail ?? (redactSecrets(stderrTrimmed).slice(0, 200) || "no output");
           throw new Error(`codex_timeout: ${detail}`);
         }
         if (code !== 0) {
