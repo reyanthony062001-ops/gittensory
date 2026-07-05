@@ -165,3 +165,4 @@ export {
   type MetadataRankContext,
 } from "./opportunity-metadata.js";
 export { pickTopMetadataOpportunities } from "./metadata-top-pick.js";
+export { rankMetadataOpportunitiesAtOrAboveScore } from "./metadata-min-score.js";
