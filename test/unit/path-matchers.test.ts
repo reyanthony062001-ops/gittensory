@@ -108,6 +108,16 @@ describe("isGeneratedFile", () => {
     expect(classifyChangedFile("proto/messages.pb.hrl")).toBe("generated");
   });
 
+  it("matches Crystal protobuf output alongside the other protoc plugins", () => {
+    for (const path of ["proto/messages.pb.cr"]) {
+      expect(isGeneratedFile(path)).toBe(true);
+    }
+    for (const path of ["src/server.cr"]) {
+      expect(isGeneratedFile(path)).toBe(false);
+    }
+    expect(classifyChangedFile("proto/messages.pb.cr")).toBe("generated");
+  });
+
   it("matches Swift protobuf, Dart freezed/retrofit, C# designer/XAML, and Objective-C protoc output", () => {
     for (const path of [
       "proto/messages.pb.swift",
@@ -432,6 +442,7 @@ describe("classifyChangedFile", () => {
       ["proto/service.grpc.swift", "generated"],
       ["proto/messages.pb.erl", "generated"],
       ["proto/messages.pb.hrl", "generated"],
+      ["proto/messages.pb.cr", "generated"],
       ["vendor/lib.go", "vendored"],
       ["package-lock.json", "lockfile"],
       ["bun.lock", "lockfile"],
