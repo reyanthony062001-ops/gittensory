@@ -130,6 +130,7 @@ import {
   type OfficialGittensorMinerDetection,
 } from "../gittensor/api";
 import {
+  isGitHubBadCredentialsError,
   createInstallationToken,
   createOrUpdateCheckRun,
   createOrUpdateErroredGateCheckRun,
@@ -8547,8 +8548,9 @@ async function maybePublishPrPublicSurface(
         actor: author,
         targetKey: `${repoFullName}#${pr.number}`,
         outcome: "completed",
-        detail: message,
-        metadata: {
+      // Rethrow transient auth failures (expired/revoked token) so the queue retries the whole job instead of
+      // silently recording a partial failure in the audit ledger. Rate-limit errors propagate for the same reason.
+      if (isGitHubRateLimitedError(error) || isGitHubBadCredentialsError(error)) throw error;
           deliveryId: webhook.deliveryId,
           repoFullName,
           aiReviewMode: settings.aiReviewMode,
@@ -8832,8 +8834,9 @@ async function maybePublishPrPublicSurface(
           },
           () =>
             createOrUpdateGateCheckRun(
-              env,
-              installationId,
+      // Rethrow transient auth failures (expired/revoked token) so the queue retries the whole job instead of
+      // silently recording a partial failure in the audit ledger. Rate-limit errors propagate for the same reason.
+      if (isGitHubRateLimitedError(error) || isGitHubBadCredentialsError(error)) throw error;
               repoFullName,
               advisory,
               gatePolicy,
@@ -8887,7 +8890,9 @@ async function maybePublishPrPublicSurface(
           if (pendingGateCheckRunId !== undefined && !gateFinalized) {
             const fallbackGateCheckResult = await createOrUpdateErroredGateCheckRun(
               env,
-              installationId,
+      // Rethrow transient auth failures (expired/revoked token) so the queue retries the whole job instead of
+      // silently recording a partial failure in the audit ledger. Rate-limit errors propagate for the same reason.
+      if (isGitHubRateLimitedError(error) || isGitHubBadCredentialsError(error)) throw error;
               repoFullName,
               advisory,
               { checkRunId: pendingGateCheckRunId },
