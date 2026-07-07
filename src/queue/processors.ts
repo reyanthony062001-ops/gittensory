@@ -3494,16 +3494,35 @@ async function prReadyForReview(
     const guardTargetKey = `${repoFullName}#${pr.number}#${pr.headSha}`;
     const alreadyFinalizedForSha = await countRecentAuditEventsForActorAndTarget(
       env,
-      "gittensory",
-      CI_STUCK_FINALIZE_GUARD_EVENT_TYPE,
-      guardTargetKey,
-      new Date(Date.now() - CI_STUCK_FINALIZE_GUARD_LOOKBACK_MS).toISOString(),
-    );
-    if (alreadyFinalizedForSha >= CI_STUCK_FINALIZE_MAX_PER_SHA) {
-      await recordAuditEvent(env, {
-        eventType: "github_app.review_deferred_ci_pending",
-        actor: "gittensory",
+      // #orb-ci-stuck-repeat-alert: the console.error itself is also rate-limited to once per SHA per
+      // CI_STUCK_ALERT_LOOKBACK_MS so the Sentry issue doesn't fire on every sweep pass for the same stuck PR.
+      const alreadyAlertedForSha = await countRecentAuditEventsForActorAndTarget(
+        env,
+        "gittensory",
+        CI_STUCK_ALERT_EVENT_TYPE,
+        guardTargetKey,
+        new Date(Date.now() - CI_STUCK_ALERT_LOOKBACK_MS).toISOString(),
         targetKey: `${repoFullName}#${pr.number}`,
+      if (alreadyAlertedForSha === 0) {
+        console.error(
+          JSON.stringify({
+            level: "error",
+            event: "ci_stuck_review_repeat_suppressed",
+            repo: repoFullName,
+            pullNumber: pr.number,
+            headSha: pr.headSha,
+            deliveryId,
+          }),
+        );
+        await recordAuditEvent(env, {
+          eventType: CI_STUCK_ALERT_EVENT_TYPE,
+          actor: "gittensory",
+          targetKey: guardTargetKey,
+          outcome: "completed",
+          detail: "Sentry alert emitted for permanently-stuck CI; suppressed for subsequent sweep passes within the lookback window",
+          metadata: { repoFullName, prNumber: pr.number, headSha: pr.headSha },
+        }).catch(() => undefined);
+      }
         outcome: "queued",
         detail: "CI still stuck pending, but already finalized once for this head SHA — deferring again instead of re-spending a review",
         metadata: { deliveryId, repoFullName, headSha: pr.headSha },
@@ -3531,6 +3550,13 @@ async function prReadyForReview(
       targetKey: `${repoFullName}#${pr.number}`,
       outcome: "completed",
       detail:
+
+// Rate-limits the ci_stuck_review_repeat_suppressed Sentry alert to at most once per SHA per day.
+// Without this, every sweep pass (every few minutes) for a permanently-stuck PR emits a new Sentry
+// event, flooding the issue with noise. The underlying deferral still fires every pass; only the
+// operator-visible alert is throttled.
+const CI_STUCK_ALERT_EVENT_TYPE = "github_app.ci_stuck_alert_sent";
+const CI_STUCK_ALERT_LOOKBACK_MS = 24 * 60 * 60 * 1000;
         "CI stuck pending past the staleness cap — finalizing so the PR is surfaced, not silently deferred forever",
       metadata: { deliveryId, repoFullName },
     }).catch(() => undefined);
