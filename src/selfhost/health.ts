@@ -167,6 +167,7 @@ function isDefinitelyPrivateHostname(hostname: string): boolean {
   // form, not the bare address.
   if (host === "localhost" || host === "0.0.0.0" || host === "[::1]") return true;
   if (host.endsWith(".local") || host.endsWith(".internal")) return true;
+  // RFC 1918 private ranges (10/8, 172.16/12, 192.168/16) plus 127/8 loopback.
   const ipv4 = /^(\d{1,3})\.(\d{1,3})\.\d{1,3}\.\d{1,3}$/.exec(host);
   if (ipv4) {
     const first = Number(ipv4[1]);

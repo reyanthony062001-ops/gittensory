@@ -270,6 +270,16 @@ describe("publicOriginReachabilityAdvisory (#4180)", () => {
     ).toMatch(/localhost/);
   });
 
+  it("regression: when both origins look bad, names PUBLIC_API_ORIGIN first (checked before PUBLIC_SITE_ORIGIN)", () => {
+    const message = publicOriginReachabilityAdvisory({
+      publicApiOrigin: "http://127.0.0.1",
+      publicSiteOrigin: "http://localhost",
+      acknowledged: false,
+    });
+    expect(message).toMatch(/127\.0\.0\.1/);
+    expect(message).not.toMatch(/localhost/);
+  });
+
   it("flags loopback, RFC1918 ranges, mDNS, and .internal — but not a normal public IP or domain", () => {
     const bad = [
       "http://localhost",
