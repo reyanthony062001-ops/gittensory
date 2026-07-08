@@ -365,6 +365,10 @@ const STDIO_TOOL_DESCRIPTORS = [
     description: "Return the maintainer queue-noise triage report for a repo: a noise score/level, the specific noise sources to clear first, and recommended maintainer actions. Maintainer-authenticated; advisory only.",
   },
   {
+    name: "gittensory_get_burden_forecast",
+    description: "Return the cached maintainer burden forecast for a repo, including projected review load, queue growth risk, stale PR signals, and a freshness marker.",
+  },
+  {
     name: "gittensory_preflight_pr",
     description: "Preflight planned PR metadata against lane, duplicate, linked issue, test, and queue signals.",
   },
@@ -532,6 +536,30 @@ server.registerTool(
   async ({ owner, repo }) => {
     const prefix = `/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
     return toolResult("Gittensory maintainer noise report.", await apiGet(`${prefix}/maintainer-noise`));
+  },
+);
+
+server.registerTool(
+  "gittensory_get_burden_forecast",
+  {
+    description: stdioToolDescription("gittensory_get_burden_forecast"),
+    inputSchema: ownerRepoShape,
+  },
+  async ({ owner, repo }) => {
+    // The burden forecast has no dedicated GET route; the API serves it as the
+    // burdenForecast slice of the repo intelligence endpoint, so proxy that and
+    // mirror the hosted tool's not_found contract when the slice is absent.
+    const prefix = `/v1/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`;
+    const intelligence = await apiGet(`${prefix}/intelligence`);
+    const repoFullName = intelligence?.repoFullName ?? `${owner}/${repo}`;
+    if (!intelligence?.burdenForecast) {
+      return toolResult(`Gittensory has no cached burden forecast for ${repoFullName}.`, { status: "not_found", repoFullName });
+    }
+    return toolResult(`Gittensory burden forecast for ${repoFullName} (cached, ${intelligence.burdenForecastFreshness?.freshness ?? "unknown"}).`, {
+      repoFullName,
+      burdenForecast: intelligence.burdenForecast,
+      burdenForecastFreshness: intelligence.burdenForecastFreshness ?? null,
+    });
   },
 );
 
