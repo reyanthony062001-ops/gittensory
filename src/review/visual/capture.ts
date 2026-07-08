@@ -6,6 +6,14 @@
 // (env.REVIEW_AUDIT), and embedded as <PUBLIC_API_ORIGIN>/gittensory/shot?key=<r2key> so GitHub's image
 // proxy fetches a fast static object instead of waiting on a live browser render.
 //
+// JSONbored/gittensory#4184: on self-host, env.REVIEW_AUDIT is often a local-filesystem store (see
+// blob-store.ts) fronted by an instance that stays deliberately PRIVATE (e.g. Tailscale-only, no public HTTP
+// surface at all) — PUBLIC_API_ORIGIN in that case is unfetchable by GitHub, so the embedded URL renders as a
+// broken image. When r2-public-upload.ts's config is present, every fresh render is ALSO uploaded to a
+// dedicated, deliberately public R2 bucket and its direct URL used instead, so the private instance itself
+// never has to answer a single public request. Config absent (default) ⇒ byte-identical to the R2/local-fs
+// behavior described above.
+//
 // PORTED from reviewbot's src/agents/gittensory/capture.ts (mapFilesToRoutes / routeForFile / capturePage /
 // buildCapture), adapted to gittensory bindings + origins. The agent-config-driven route rules, authed-route
 // preview session, and explicit-route override are intentionally dropped here — gittensory's UI uses the
@@ -24,6 +32,7 @@ import {
 import { captureScrollFrames, captureShot, DESKTOP_VIEWPORT, MOBILE_VIEWPORT, type ShotTheme, type Viewport } from "./shot";
 import { compareCapturedScreenshots, isVisualDiffAvailable, type VisualDiffOutcome } from "./pixel-diff";
 import { encodeScrollGif, isScrollGifAvailable } from "./scroll-gif";
+import { publicUrlForKey, resolveR2PublicUploadConfig, uploadToPublicR2Bucket } from "../../selfhost/r2-public-upload";
 
 const NAMESPACE = "gittensory";
 const DEFAULT_ROUTES = ["/"];
@@ -242,9 +251,15 @@ async function capturePage(
       `${target.headSha ?? target.prNumber}:${slot}:${viewportName}:${page}${theme ? `:${theme}` : ""}${theme && themeStorageKey ? `:${themeStorageKey}` : ""}`,
     );
     const key = `${NAMESPACE}/shots/${fingerprint.slice(0, 40)}.png`;
-    const url = shotBase ? `${shotBase}/${NAMESPACE}/shot?key=${encodeURIComponent(key)}` : onDemand;
+    const localUrl = shotBase ? `${shotBase}/${NAMESPACE}/shot?key=${encodeURIComponent(key)}` : onDemand;
+    const r2Public = resolveR2PublicUploadConfig(env);
     const cached = await env.REVIEW_AUDIT.get(key).catch(() => null);
     if (cached) {
+      // A public bucket is trusted to already mirror any key this instance ever caches locally, since the
+      // two are written together below on every fresh render going forward -- see r2-public-upload.ts's
+      // module doc for the one-time transition caveat this accepts for cache entries written before the
+      // bucket was configured.
+      const url = r2Public ? publicUrlForKey(r2Public, key) : localUrl;
       if (!includeBytes) return { url };
       const bytes = await new Response(cached.body).arrayBuffer().then((buf) => new Uint8Array(buf)).catch(() => undefined);
       return { url, ...(bytes ? { png: bytes } : {}) };
@@ -257,6 +272,7 @@ async function capturePage(
     }
     if (png) {
       await env.REVIEW_AUDIT.put(key, png, { httpMetadata: { contentType: "image/png" } }).catch(() => undefined);
+      const url = r2Public ? (await uploadToPublicR2Bucket(r2Public, key, png, "image/png")) ?? localUrl : localUrl;
       return { url, ...(includeBytes ? { png } : {}) };
     }
   }
@@ -281,6 +297,8 @@ async function resolveFallbackAfterShot(
   const key = await fallbackShotR2Key(target.headSha, path, viewportName);
   const cached = await env.REVIEW_AUDIT.get(key).catch(() => null);
   if (!cached) return { url: placeholder };
+  const r2Public = resolveR2PublicUploadConfig(env);
+  if (r2Public) return { url: publicUrlForKey(r2Public, key) };
   const shotBase = env.PUBLIC_API_ORIGIN;
   return { url: shotBase ? `${shotBase}/${NAMESPACE}/shot?key=${encodeURIComponent(key)}` : placeholder };
 }
@@ -302,6 +320,11 @@ async function uploadDiffImage(
   const fingerprint = await sha256Hex(`${target.headSha ?? target.prNumber}:diff:${viewportName}:${path}${theme ? `:${theme}` : ""}`);
   const key = `${NAMESPACE}/shots/${fingerprint.slice(0, 40)}-diff.png`;
   await env.REVIEW_AUDIT.put(key, diff.diffImagePng, { httpMetadata: { contentType: "image/png" } }).catch(() => undefined);
+  const r2Public = resolveR2PublicUploadConfig(env);
+  if (r2Public) {
+    const publicUrl = await uploadToPublicR2Bucket(r2Public, key, diff.diffImagePng, "image/png");
+    if (publicUrl) return publicUrl;
+  }
   return `${shotBase}/${NAMESPACE}/shot?key=${encodeURIComponent(key)}`;
 }
 
@@ -334,9 +357,11 @@ async function captureScrollGif(
     `${target.headSha ?? target.prNumber}:scrollgif:${slot}:${viewportName}:${page}${theme ? `:${theme}` : ""}${theme && themeStorageKey ? `:${themeStorageKey}` : ""}`,
   );
   const key = `${NAMESPACE}/shots/${fingerprint.slice(0, 40)}.gif`;
-  const url = `${shotBase}/${NAMESPACE}/shot?key=${encodeURIComponent(key)}`;
+  const localUrl = `${shotBase}/${NAMESPACE}/shot?key=${encodeURIComponent(key)}`;
+  const r2Public = resolveR2PublicUploadConfig(env);
   const cached = await env.REVIEW_AUDIT.get(key).catch(() => null);
-  if (cached) return url;
+  // Same "already mirrored" trust as capturePage's own cache-hit branch — see that function's comment.
+  if (cached) return r2Public ? publicUrlForKey(r2Public, key) : localUrl;
   const { frames, authWalled } = await captureScrollFrames(env, page, viewport, theme ? { theme, ...(themeStorageKey ? { themeStorageKey } : {}) } : {}).catch(() => ({ frames: [] as Uint8Array[], authWalled: false }));
   if (authWalled || frames.length === 0) return undefined;
   const gifBytes = await encodeScrollGif(
@@ -345,7 +370,11 @@ async function captureScrollGif(
   );
   if (!gifBytes) return undefined;
   await env.REVIEW_AUDIT.put(key, gifBytes, { httpMetadata: { contentType: "image/gif" } }).catch(() => undefined);
-  return url;
+  if (r2Public) {
+    const publicUrl = await uploadToPublicR2Bucket(r2Public, key, gifBytes, "image/gif");
+    if (publicUrl) return publicUrl;
+  }
+  return localUrl;
 }
 
 /** Per-repo `review.visual` config, as resolved by the caller from the manifest (#3609 / #3610 / #3678 /

@@ -381,6 +381,7 @@ import {
   FALLBACK_WORKFLOW_NAME,
   parseFallbackRunCorrelation,
 } from "../review/visual/actions-fallback";
+import { resolveR2PublicUploadConfig, uploadToPublicR2Bucket } from "../selfhost/r2-public-upload";
 import {
   buildVisualRegressionFindings,
   buildVisualVisionUserPrompt,
@@ -4534,6 +4535,11 @@ async function storeVisualCaptureFallbackShots(
       if (!png) continue;
       const key = await fallbackShotR2Key(headSha, path, viewportName);
       await env.REVIEW_AUDIT.put(key, png, { httpMetadata: { contentType: "image/png" } }).catch(() => undefined);
+      // Mirror to the public bucket too (#4184) so capture.ts's resolveFallbackAfterShot -- which trusts any
+      // key found in REVIEW_AUDIT to already be mirrored -- doesn't link to an object that was never actually
+      // uploaded there.
+      const r2Public = resolveR2PublicUploadConfig(env);
+      if (r2Public) await uploadToPublicR2Bucket(r2Public, key, png, "image/png");
     }
   }
 }

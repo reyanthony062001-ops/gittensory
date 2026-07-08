@@ -7,6 +7,7 @@ import * as rateLimitModule from "../../src/github/rate-limit";
 import * as repositoriesModule from "../../src/db/repositories";
 import * as reviewEffortModule from "../../src/review/review-effort";
 import * as repositorySettingsModule from "../../src/settings/repository-settings";
+import * as actionsFallbackModule from "../../src/review/visual/actions-fallback";
 import * as sentryModule from "../../src/selfhost/sentry";
 import { renderMetrics, resetMetrics } from "../../src/selfhost/metrics";
 import { jobCoalesceKey } from "../../src/selfhost/queue-common";
@@ -29827,5 +29828,121 @@ describe("auto-action convergence: end-to-end plan+execute for the general heuri
     expect(seen.closed).toBe(false);
     const closeAudit = await env.DB.prepare("select count(*) as n from audit_events where event_type = 'agent.action.close'").first<{ n: number }>();
     expect(closeAudit?.n).toBe(0);
+  });
+});
+
+describe("storeVisualCaptureFallbackShots (#4184 public bucket mirror)", () => {
+  function memoryReviewAudit(): R2Bucket {
+    const store = new Map<string, Uint8Array>();
+    return {
+      async get(key: string) {
+        const bytes = store.get(key);
+        return bytes ? ({ body: new Response(bytes).body } as unknown as R2ObjectBody) : null;
+      },
+      async put(key: string, value: unknown) {
+        const bytes = new Uint8Array(await new Response(value as BodyInit).arrayBuffer());
+        store.set(key, bytes);
+        return { key } as unknown as R2Object;
+      },
+    } as unknown as R2Bucket;
+  }
+
+  const R2_PUBLIC_ENV = {
+    R2_PUBLIC_ACCOUNT_ID: "acct123",
+    R2_PUBLIC_BUCKET: "gittensory-visual-capture-public",
+    R2_PUBLIC_ACCESS_KEY_ID: "ak",
+    R2_PUBLIC_SECRET_ACCESS_KEY: "sk",
+    R2_PUBLIC_BASE_URL: "https://pub-example.r2.dev",
+  };
+
+  async function seedFallbackRepoAndPr(env: ReturnType<typeof createTestEnv>, headSha: string): Promise<void> {
+    await upsertInstallation(env, { action: "created", installation: { id: 9001, account: { login: "owner", id: 1, type: "Organization" }, target_type: "Organization", repository_selection: "selected", permissions: {}, events: [] } });
+    await upsertRepositoryFromGitHub(env, { name: "fallback-repo", full_name: "owner/fallback-repo", private: false, owner: { login: "owner" } }, 9001);
+    await upsertRepositorySettings(env, { repoFullName: "owner/fallback-repo", gatePack: "oss-anti-slop", gateCheckMode: "enabled", checkRunMode: "off", commentMode: "off", publicSurface: "off" });
+    await upsertPullRequestFromGitHub(env, "owner/fallback-repo", { number: 12, title: "Fallback shot test", state: "open", user: { login: "contributor" }, head: { sha: headSha }, base: { ref: "main" }, labels: [], body: "Closes #1" });
+  }
+
+  function fallbackWorkflowRunPayload(headSha: string, prNumber: number): unknown {
+    return {
+      action: "completed",
+      repository: { name: "fallback-repo", full_name: "owner/fallback-repo", owner: { login: "owner" } },
+      installation: { id: 9001 },
+      workflow_run: {
+        id: 555,
+        name: "Gittensory Visual Capture Fallback",
+        event: "workflow_dispatch",
+        conclusion: "success",
+        display_title: `gittensory-visual-fallback pr=${prNumber} sha=${headSha}`,
+      },
+    };
+  }
+
+  function stubFallbackFetch(): (input: RequestInfo | URL, init?: RequestInit) => Promise<Response> {
+    return async (input) => {
+      const url = String(input);
+      if (url.includes("/access_tokens")) return Response.json({ token: "installation-token" });
+      if (url.includes("/pulls/12/files")) return Response.json([]); // no gittensory-ui route file -> falls to DEFAULT_ROUTES ["/"]
+      if (url.includes("r2.cloudflarestorage.com")) return new Response(null, { status: 200 });
+      return new Response("not found", { status: 404 }); // manifest load, re-review kickoff, etc. -- all fail-safe to defaults
+    };
+  }
+
+  it("mirrors a stored fallback shot to the public bucket when configured", async () => {
+    const headSha = "b".repeat(40);
+    const env = createTestEnv({ ...R2_PUBLIC_ENV, GITHUB_APP_PRIVATE_KEY: await generatePrivateKeyPem(), GITTENSORY_REVIEW_REPOS: "owner/fallback-repo", REVIEW_AUDIT: memoryReviewAudit() });
+    await seedFallbackRepoAndPr(env, headSha);
+    const fetchSpy = vi.fn(stubFallbackFetch());
+    vi.stubGlobal("fetch", fetchSpy);
+    const shotsSpy = vi.spyOn(actionsFallbackModule, "fetchFallbackArtifactShots").mockResolvedValue([
+      { fileName: actionsFallbackModule.fallbackShotFileName("/", "desktop"), png: new Uint8Array([1, 2, 3]) },
+      { fileName: actionsFallbackModule.fallbackShotFileName("/", "mobile"), png: new Uint8Array([4, 5, 6]) },
+    ]);
+    try {
+      await processJob(env, {
+        type: "github-webhook",
+        deliveryId: "fallback-run-completed",
+        eventName: "workflow_run",
+        payload: fallbackWorkflowRunPayload(headSha, 12),
+      } as never);
+
+      const desktopKey = await actionsFallbackModule.fallbackShotR2Key(headSha, "/", "desktop");
+      expect(await env.REVIEW_AUDIT!.get(desktopKey)).not.toBeNull(); // local mirror still happens exactly as before this feature
+      const mobileKey = await actionsFallbackModule.fallbackShotR2Key(headSha, "/", "mobile");
+      expect(await env.REVIEW_AUDIT!.get(mobileKey)).not.toBeNull();
+
+      // Confirms uploadToPublicR2Bucket was actually invoked for BOTH shots, not just resolveR2PublicUploadConfig
+      // resolving truthy and stopping there.
+      const r2PutCalls = fetchSpy.mock.calls.filter(([input]) => String(input).includes("r2.cloudflarestorage.com"));
+      expect(r2PutCalls.length).toBe(2);
+    } finally {
+      shotsSpy.mockRestore();
+    }
+  });
+
+  it("never attempts a public-bucket upload when the public bucket isn't configured (byte-identical to before this feature)", async () => {
+    const headSha = "c".repeat(40);
+    const env = createTestEnv({ GITHUB_APP_PRIVATE_KEY: await generatePrivateKeyPem(), GITTENSORY_REVIEW_REPOS: "owner/fallback-repo", REVIEW_AUDIT: memoryReviewAudit() });
+    await seedFallbackRepoAndPr(env, headSha);
+    const fetchSpy = vi.fn(stubFallbackFetch());
+    vi.stubGlobal("fetch", fetchSpy);
+    const shotsSpy = vi.spyOn(actionsFallbackModule, "fetchFallbackArtifactShots").mockResolvedValue([
+      { fileName: actionsFallbackModule.fallbackShotFileName("/", "desktop"), png: new Uint8Array([1, 2, 3]) },
+    ]);
+    try {
+      await processJob(env, {
+        type: "github-webhook",
+        deliveryId: "fallback-run-completed-no-public-bucket",
+        eventName: "workflow_run",
+        payload: fallbackWorkflowRunPayload(headSha, 12),
+      } as never);
+
+      // Proves the code path actually ran (not a vacuous pass from an early-return elsewhere) before trusting
+      // the negative assertion below.
+      const desktopKey = await actionsFallbackModule.fallbackShotR2Key(headSha, "/", "desktop");
+      expect(await env.REVIEW_AUDIT!.get(desktopKey)).not.toBeNull();
+      expect(fetchSpy.mock.calls.some(([input]) => String(input).includes("r2.cloudflarestorage.com"))).toBe(false);
+    } finally {
+      shotsSpy.mockRestore();
+    }
   });
 });

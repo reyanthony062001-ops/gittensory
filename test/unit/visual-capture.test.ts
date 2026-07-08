@@ -1554,6 +1554,258 @@ describe("review.visual.actions_fallback (#4112 GitHub-Actions build-and-serve f
 
     expect(result.routes[0]?.afterUrl).toContain("placeholder=loading");
   });
+
+  it("regression: shows the requires-authentication placeholder for a sign-in-walled route (pre-existing gap, no prior test covered this)", async () => {
+    const captureShotSpy = vi.spyOn(shotModule, "captureShot").mockResolvedValue({ png: null, authWalled: true });
+    try {
+      const env = createTestEnv({
+        PUBLIC_API_ORIGIN: "https://worker.example",
+        PUBLIC_SITE_ORIGIN: "https://prod.example.com",
+        REVIEW_AUDIT: memoryReviewAudit(),
+      });
+      const result = await buildCapture(
+        env,
+        "installation-token",
+        { repoFullName: "owner/repo", prNumber: 44, previewUrl: "https://preview.example.com" },
+        ["apps/gittensory-ui/src/routes/app.index.tsx"],
+      );
+      expect(result.routes[0]?.beforeUrl).toContain("placeholder=auth");
+    } finally {
+      captureShotSpy.mockRestore();
+    }
+  });
+});
+
+describe("public R2 bucket screenshot upload (#4184)", () => {
+  const R2_PUBLIC_ENV = {
+    PUBLIC_API_ORIGIN: "https://edge.internal.example", // stays private -- the whole point of this feature
+    PUBLIC_SITE_ORIGIN: "https://prod.example.com",
+    R2_PUBLIC_ACCOUNT_ID: "acct123",
+    R2_PUBLIC_BUCKET: "gittensory-visual-capture-public",
+    R2_PUBLIC_ACCESS_KEY_ID: "ak",
+    R2_PUBLIC_SECRET_ACCESS_KEY: "sk",
+    R2_PUBLIC_BASE_URL: "https://pub-example.r2.dev",
+  };
+
+  function stubR2Fetch(ok: boolean): void {
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("r2.cloudflarestorage.com")) return new Response(null, { status: ok ? 200 : 500 });
+      // A test that omits previewUrl also triggers buildCapture's own deployment-discovery lookup — an empty
+      // result degrades it to "no preview found" exactly like preview-url.test.ts's own stubs, not a stray call.
+      return new Response("not found", { status: 404 });
+    }));
+  }
+
+  it("uploads a fresh render to the public bucket and returns its direct URL instead of the private origin's", async () => {
+    stubR2Fetch(true);
+    const captureShotSpy = vi.spyOn(shotModule, "captureShot").mockResolvedValue({ png: new Uint8Array([1, 2, 3]), authWalled: false });
+    try {
+      const env = createTestEnv({ ...R2_PUBLIC_ENV, REVIEW_AUDIT: memoryReviewAudit() });
+      const result = await buildCapture(
+        env,
+        "installation-token",
+        { repoFullName: "owner/repo", prNumber: 100, previewUrl: "https://preview.example.com" },
+        ["apps/gittensory-ui/src/routes/app.index.tsx"],
+      );
+      expect(result.routes[0]?.beforeUrl).toMatch(/^https:\/\/pub-example\.r2\.dev\//);
+      expect(result.routes[0]?.beforeUrl).not.toContain("edge.internal.example");
+    } finally {
+      captureShotSpy.mockRestore();
+    }
+  });
+
+  it("falls back to the private-origin URL when the public bucket upload itself fails", async () => {
+    stubR2Fetch(false);
+    const captureShotSpy = vi.spyOn(shotModule, "captureShot").mockResolvedValue({ png: new Uint8Array([1, 2, 3]), authWalled: false });
+    try {
+      const env = createTestEnv({ ...R2_PUBLIC_ENV, REVIEW_AUDIT: memoryReviewAudit() });
+      const result = await buildCapture(
+        env,
+        "installation-token",
+        { repoFullName: "owner/repo", prNumber: 101, previewUrl: "https://preview.example.com" },
+        ["apps/gittensory-ui/src/routes/app.index.tsx"],
+      );
+      expect(result.routes[0]?.beforeUrl).toContain("edge.internal.example");
+    } finally {
+      captureShotSpy.mockRestore();
+    }
+  });
+
+  it("regression: a cache hit with no PUBLIC_API_ORIGIN and no public bucket falls back to the raw page URL (localUrl's shotBase-less side)", async () => {
+    const key = await shotKey(109, "before", "desktop", "https://prod.example.com/app");
+    const seeded = memoryReviewAudit();
+    await seeded.put(key, new Uint8Array([9, 9, 9]));
+    const env = createTestEnv({ PUBLIC_SITE_ORIGIN: "https://prod.example.com", REVIEW_AUDIT: seeded });
+    delete (env as Partial<Env>).PUBLIC_API_ORIGIN;
+    const result = await buildCapture(
+      env,
+      "installation-token",
+      { repoFullName: "owner/repo", prNumber: 109, previewUrl: "https://preview.example.com" },
+      ["apps/gittensory-ui/src/routes/app.index.tsx"],
+    );
+    expect(result.routes[0]?.beforeUrl).toBe("https://prod.example.com/app");
+  });
+
+  it("trusts a cache hit as already-mirrored and returns the public URL with no upload call at all", async () => {
+    const fetchSpy = vi.fn(async () => { throw new Error("must not be called on a cache hit"); });
+    vi.stubGlobal("fetch", fetchSpy);
+    const key = await shotKey(102, "before", "desktop", "https://prod.example.com/app");
+    const seeded = memoryReviewAudit();
+    await seeded.put(key, new Uint8Array([9, 9, 9]));
+    const env = createTestEnv({ ...R2_PUBLIC_ENV, REVIEW_AUDIT: seeded });
+    const result = await buildCapture(
+      env,
+      "installation-token",
+      { repoFullName: "owner/repo", prNumber: 102, previewUrl: "https://preview.example.com" },
+      ["apps/gittensory-ui/src/routes/app.index.tsx"],
+    );
+    expect(result.routes[0]?.beforeUrl).toBe(`https://pub-example.r2.dev/${key}`);
+  });
+
+  it("resolveFallbackAfterShot: returns the public bucket URL for an actions-fallback shot too, not just capturePage's own renders", async () => {
+    stubR2Fetch(true);
+    const env = createTestEnv({ ...R2_PUBLIC_ENV, REVIEW_AUDIT: memoryReviewAudit() });
+    const headSha = "a".repeat(40);
+    await markFallbackDispatched(env, headSha);
+    const key = await fallbackShotR2Key(headSha, "/app", "desktop");
+    await env.REVIEW_AUDIT!.put(key, new Uint8Array([4, 5, 6]));
+    const result = await buildCapture(
+      env,
+      "installation-token",
+      { repoFullName: "owner/repo", prNumber: 103, headSha, defaultBranchRef: "main" },
+      ["apps/gittensory-ui/src/routes/app.index.tsx"],
+      undefined,
+      { actionsFallback: true },
+    );
+    expect(result.routes[0]?.afterUrl).toBe(`https://pub-example.r2.dev/${key}`);
+  });
+
+  it("uploadDiffImage: uploads a computed diff overlay to the public bucket and returns its direct URL", async () => {
+    stubR2Fetch(true);
+    const availableSpy = vi.spyOn(pixelDiffModule, "isVisualDiffAvailable").mockReturnValue(true);
+    const compareSpy = vi.spyOn(pixelDiffModule, "compareCapturedScreenshots").mockResolvedValue({
+      status: "changed",
+      changedPixelPercent: 30,
+      diffImagePng: new Uint8Array([7, 7, 7]),
+    });
+    const captureShotSpy = vi.spyOn(shotModule, "captureShot").mockResolvedValue({ png: new Uint8Array([9, 9, 9]), authWalled: false });
+    try {
+      const env = createTestEnv({ ...R2_PUBLIC_ENV, REVIEW_AUDIT: memoryReviewAudit() });
+      const result = await buildCapture(
+        env,
+        "installation-token",
+        { repoFullName: "owner/repo", prNumber: 104, previewUrl: "https://preview.example.com" },
+        ["apps/gittensory-ui/src/routes/app.index.tsx"],
+      );
+      expect(result.routes[0]?.diffUrl).toMatch(/^https:\/\/pub-example\.r2\.dev\//);
+    } finally {
+      availableSpy.mockRestore();
+      compareSpy.mockRestore();
+      captureShotSpy.mockRestore();
+    }
+  });
+
+  it("uploadDiffImage: falls back to the private-origin URL when the public bucket upload fails", async () => {
+    stubR2Fetch(false);
+    const availableSpy = vi.spyOn(pixelDiffModule, "isVisualDiffAvailable").mockReturnValue(true);
+    const compareSpy = vi.spyOn(pixelDiffModule, "compareCapturedScreenshots").mockResolvedValue({
+      status: "changed",
+      changedPixelPercent: 30,
+      diffImagePng: new Uint8Array([7, 7, 7]),
+    });
+    const captureShotSpy = vi.spyOn(shotModule, "captureShot").mockResolvedValue({ png: new Uint8Array([9, 9, 9]), authWalled: false });
+    try {
+      const env = createTestEnv({ ...R2_PUBLIC_ENV, REVIEW_AUDIT: memoryReviewAudit() });
+      const result = await buildCapture(
+        env,
+        "installation-token",
+        { repoFullName: "owner/repo", prNumber: 105, previewUrl: "https://preview.example.com" },
+        ["apps/gittensory-ui/src/routes/app.index.tsx"],
+      );
+      expect(result.routes[0]?.diffUrl).toContain("edge.internal.example");
+    } finally {
+      availableSpy.mockRestore();
+      compareSpy.mockRestore();
+      captureShotSpy.mockRestore();
+    }
+  });
+
+  it("captureScrollGif: uploads a freshly-encoded GIF to the public bucket and returns its direct URL", async () => {
+    stubR2Fetch(true);
+    const gifAvailableSpy = vi.spyOn(scrollGifModule, "isScrollGifAvailable").mockReturnValue(true);
+    const captureScrollSpy = vi.spyOn(shotModule, "captureScrollFrames").mockResolvedValue({
+      frames: [new Uint8Array([1, 2, 3])],
+      authWalled: false,
+    });
+    const encodeSpy = vi.spyOn(scrollGifModule, "encodeScrollGif").mockResolvedValue(new Uint8Array([7, 8, 9]));
+    try {
+      const env = createTestEnv({ ...R2_PUBLIC_ENV, REVIEW_AUDIT: memoryReviewAudit() });
+      const result = await buildCapture(
+        env,
+        "installation-token",
+        { repoFullName: "owner/repo", prNumber: 106, previewUrl: "https://preview.example.com" },
+        ["apps/gittensory-ui/src/routes/app.index.tsx"],
+        undefined,
+        { gif: true },
+      );
+      expect(result.routes[0]?.afterGifUrl).toMatch(/^https:\/\/pub-example\.r2\.dev\//);
+    } finally {
+      gifAvailableSpy.mockRestore();
+      captureScrollSpy.mockRestore();
+      encodeSpy.mockRestore();
+    }
+  });
+
+  it("captureScrollGif: falls back to the private-origin URL when the public bucket upload fails", async () => {
+    stubR2Fetch(false);
+    const gifAvailableSpy = vi.spyOn(scrollGifModule, "isScrollGifAvailable").mockReturnValue(true);
+    const captureScrollSpy = vi.spyOn(shotModule, "captureScrollFrames").mockResolvedValue({
+      frames: [new Uint8Array([1, 2, 3])],
+      authWalled: false,
+    });
+    const encodeSpy = vi.spyOn(scrollGifModule, "encodeScrollGif").mockResolvedValue(new Uint8Array([7, 8, 9]));
+    try {
+      const env = createTestEnv({ ...R2_PUBLIC_ENV, REVIEW_AUDIT: memoryReviewAudit() });
+      const result = await buildCapture(
+        env,
+        "installation-token",
+        { repoFullName: "owner/repo", prNumber: 107, previewUrl: "https://preview.example.com" },
+        ["apps/gittensory-ui/src/routes/app.index.tsx"],
+        undefined,
+        { gif: true },
+      );
+      expect(result.routes[0]?.afterGifUrl).toContain("edge.internal.example");
+    } finally {
+      gifAvailableSpy.mockRestore();
+      captureScrollSpy.mockRestore();
+      encodeSpy.mockRestore();
+    }
+  });
+
+  it("captureScrollGif: trusts a cache hit as already-mirrored too, same as capturePage's own cache-hit branch", async () => {
+    const gifAvailableSpy = vi.spyOn(scrollGifModule, "isScrollGifAvailable").mockReturnValue(true);
+    const fetchSpy = vi.fn(async () => { throw new Error("must not be called on a cache hit"); });
+    vi.stubGlobal("fetch", fetchSpy);
+    try {
+      const fingerprint = await sha256Hex("108:scrollgif:after:desktop:https://preview.example.com/app");
+      const key = `gittensory/shots/${fingerprint.slice(0, 40)}.gif`;
+      const seeded = memoryReviewAudit();
+      await seeded.put(key, new Uint8Array([7, 8, 9]));
+      const env = createTestEnv({ ...R2_PUBLIC_ENV, REVIEW_AUDIT: seeded });
+      const result = await buildCapture(
+        env,
+        "installation-token",
+        { repoFullName: "owner/repo", prNumber: 108, previewUrl: "https://preview.example.com" },
+        ["apps/gittensory-ui/src/routes/app.index.tsx"],
+        undefined,
+        { gif: true },
+      );
+      expect(result.routes[0]?.afterGifUrl).toBe(`https://pub-example.r2.dev/${key}`);
+    } finally {
+      gifAvailableSpy.mockRestore();
+    }
+  });
 });
 
 describe("fetchShotContentBlock (#4111)", () => {

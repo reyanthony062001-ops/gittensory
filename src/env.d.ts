@@ -45,6 +45,15 @@ declare global {
      *  Deliberately NOT declared in this chunk; the review path keeps its current concurrency behavior. */
     PUBLIC_API_ORIGIN?: string;
     PUBLIC_SITE_ORIGIN?: string;
+    /** JSONbored/gittensory#4184: upload visual-capture screenshots to a dedicated public R2 bucket and link
+     *  directly to it, for a self-host instance whose PUBLIC_API_ORIGIN stays deliberately private (e.g.
+     *  Tailscale-only). All five required together (see resolveR2PublicUploadConfig) -- any one missing means
+     *  not configured, not an error. */
+    R2_PUBLIC_ACCOUNT_ID?: string;
+    R2_PUBLIC_BUCKET?: string;
+    R2_PUBLIC_ACCESS_KEY_ID?: string;
+    R2_PUBLIC_SECRET_ACCESS_KEY?: string;
+    R2_PUBLIC_BASE_URL?: string;
     AI_SUMMARIES_ENABLED?: string;
     AI_PUBLIC_COMMENTS_ENABLED?: string;
     /** Model id for a genuine Cloudflare Workers AI binding only — no live deployment (hosted or self-host)
