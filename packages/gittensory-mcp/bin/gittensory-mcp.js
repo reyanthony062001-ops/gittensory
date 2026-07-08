@@ -53,7 +53,7 @@ const CLI_COMMAND_SPEC = {
   profile: ["list", "create", "switch", "remove"],
   cache: ["status", "clear"],
   agent: ["plan", "status", "explain", "packet"],
-  maintain: ["status", "approve", "reject", "pause", "resume", "set-level"],
+  maintain: ["status", "approve", "reject", "pause", "resume", "set-level", "precision"],
 };
 const COMPLETION_SHELLS = ["bash", "zsh", "fish", "powershell"];
 const AGENT_PROFILE_IDS = ["miner-planner", "miner-auto-dev", "maintainer-triage", "repo-owner-intake"];
@@ -1410,6 +1410,7 @@ function printMaintainHelp() {
       "  set-level <action> <level>   Set the autonomy level for one action class.",
       `                               actions: ${MAINTAIN_ACTION_CLASSES.join(", ")}`,
       `                               levels:  ${MAINTAIN_AUTONOMY_LEVELS.join(", ")}`,
+      "  precision [--window-days N]  Show gate false-positive telemetry (blocked-then-merged per gate type).",
       "",
       "Pass --json for machine-readable output.",
     ].join("\n") + "\n",
@@ -1464,7 +1465,28 @@ async function maintainCli(args) {
     emit(payload, `Set ${action} autonomy to ${level} for ${repoFullName}.`);
     return;
   }
-  throw new Error(`Unknown maintain subcommand: ${subcommand}. Use status | approve <id> | reject <id> | pause | resume | set-level <action> <level>.`);
+  if (subcommand === "precision") {
+    // #554 gate false-positive telemetry: read-only measurement of blocked-then-merged PRs per gate type.
+    // The API enforces maintainer authorization; the CLI never decides locally. Optional --window-days bounds
+    // the block ledger the same way the route's ?windowDays query does (a non-positive value falls through to
+    // full history server-side).
+    const windowDays = Number(options.windowDays);
+    const query = windowDays > 0 ? `?windowDays=${encodeURIComponent(windowDays)}` : "";
+    const payload = await apiGet(`${repoBase}/gate-precision${query}`);
+    const overall = payload.overall ?? {};
+    const window = payload.windowDays ? `last ${payload.windowDays}d` : "all history";
+    const rate = (value) => (value === null || value === undefined ? "n/a (below sample)" : `${Math.round(value * 100)}%`);
+    const lines = [
+      `Gate precision for ${repoFullName} (${window}): ${overall.blocked ?? 0} blocked, ${overall.blockedThenMerged ?? 0} blocked-then-merged, false-positive rate ${rate(overall.falsePositiveRate)}.`,
+      ...(payload.perGateType ?? []).map(
+        (type) => `- ${type.gateType}: ${type.blocked} blocked, ${type.blockedThenMerged} merged anyway${type.falsePositiveRate === null ? "" : ` (${Math.round(type.falsePositiveRate * 100)}% FP)`}`,
+      ),
+      ...(payload.signals ?? []),
+    ];
+    emit(payload, lines.join("\n"));
+    return;
+  }
+  throw new Error(`Unknown maintain subcommand: ${subcommand}. Use status | approve <id> | reject <id> | pause | resume | set-level <action> <level> | precision.`);
 }
 
 async function runCli(args) {

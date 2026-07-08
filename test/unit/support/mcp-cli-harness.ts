@@ -317,6 +317,24 @@ export async function startFixtureServer(
       response.end(JSON.stringify({ repoFullName: "owner/repo", agentPaused: body.agentPaused === true, ...(body.autonomy ? { autonomy: body.autonomy } : {}) }));
       return;
     }
+    // #554 gate precision telemetry (read-only). Echoes ?windowDays so the CLI window pass-through is testable.
+    if (request.url?.startsWith("/v1/repos/owner/repo/gate-precision") && request.method === "GET") {
+      const windowDays = new URL(request.url, "http://localhost").searchParams.get("windowDays");
+      response.end(
+        JSON.stringify({
+          repoFullName: "owner/repo",
+          generatedAt: "2026-05-30T00:00:00.000Z",
+          windowDays: windowDays ? Number(windowDays) : null,
+          perGateType: [
+            { gateType: "duplicate-pr", blocked: 8, blockedThenMerged: 2, overridden: 1, falsePositiveRate: 0.25 },
+            { gateType: "missing-linked-issue", blocked: 3, blockedThenMerged: 0, overridden: 0, falsePositiveRate: null },
+          ],
+          overall: { blocked: 11, blockedThenMerged: 2, falsePositiveRate: 0.182 },
+          signals: ["Highest false-positive gate: `duplicate-pr` — 25% of its 8 blocks merged anyway (1 overridden). Keep it advisory until this drops."],
+        }),
+      );
+      return;
+    }
     if (request.url === "/v1/upstream/drift" && request.method === "GET") {
       response.end(
         JSON.stringify({

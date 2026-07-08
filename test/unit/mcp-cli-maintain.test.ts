@@ -49,6 +49,23 @@ describe("gittensory-mcp CLI — maintain (#784)", () => {
     expect(plain).toMatch(/Set merge autonomy to auto for owner\/repo/);
   });
 
+  it("precision reports gate false-positive telemetry (plain + json), passing the window through", async () => {
+    const e = await env();
+    const out = await runAsync(["maintain", "precision", "--repo", "owner/repo"], e);
+    expect(out).toMatch(/Gate precision for owner\/repo \(all history\): 11 blocked, 2 blocked-then-merged, false-positive rate 18%/);
+    expect(out).toMatch(/duplicate-pr: 8 blocked, 2 merged anyway \(25% FP\)/);
+    // A per-type rate of null (below sample) is rendered without an FP suffix.
+    expect(out).toMatch(/missing-linked-issue: 3 blocked, 0 merged anyway$/m);
+    expect(out).toMatch(/Highest false-positive gate: `duplicate-pr`/);
+    const json = JSON.parse(await runAsync(["maintain", "precision", "--repo", "owner/repo", "--json"], e)) as {
+      overall: { blocked: number; falsePositiveRate: number };
+    };
+    expect(json.overall).toMatchObject({ blocked: 11, falsePositiveRate: 0.182 });
+    // --window-days bounds the ledger; the CLI forwards it as ?windowDays and reflects it in the summary.
+    const scoped = await runAsync(["maintain", "precision", "--repo", "owner/repo", "--window-days", "30"], e);
+    expect(scoped).toMatch(/Gate precision for owner\/repo \(last 30d\)/);
+  });
+
   it("validates inputs: --repo required, id required for approve, known subcommand + action/level", async () => {
     const e = await env();
     await expect(runAsync(["maintain", "status"], e)).rejects.toThrow(/Pass --repo/);
