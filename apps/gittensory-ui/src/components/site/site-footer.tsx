@@ -1,6 +1,8 @@
 import { Link } from "@tanstack/react-router";
 import { Github } from "lucide-react";
 
+import { Badge } from "@/components/ui/badge";
+
 import { GittensoryMark } from "./mark";
 import { HealthDot } from "./health-dot";
 
@@ -122,6 +124,9 @@ export function SiteFooter() {
               </a>{" "}
               OSS project.
             </span>
+            <Badge variant="outline" className="border-hairline text-muted-foreground">
+              AGPL-3.0
+            </Badge>
           </div>
         </div>
       </div>
