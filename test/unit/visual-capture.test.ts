@@ -1681,6 +1681,28 @@ describe("review.visual.actions_fallback (#4112 GitHub-Actions build-and-serve f
     expect(result.routes[0]?.afterUrl).toBe(`https://pub-abc123.r2.dev/${key}`);
   });
 
+  it("degrades to no after URL at all when a fallback shot is cached but neither PUBLIC_API_ORIGIN nor REVIEW_AUDIT_S3_PUBLIC_URL is configured (nothing servable can be constructed, not even a placeholder)", async () => {
+    vi.stubGlobal("fetch", stubNoPreviewFound());
+    const env = createTestEnv({
+      PUBLIC_API_ORIGIN: "",
+      PUBLIC_SITE_ORIGIN: "https://prod.example.com",
+      REVIEW_AUDIT: memoryReviewAudit(),
+    });
+    const key = await fallbackShotR2Key("cafebabe", "/app", "desktop");
+    await env.REVIEW_AUDIT!.put(key, new Uint8Array([1, 2, 3]));
+
+    const result = await buildCapture(
+      env,
+      "installation-token",
+      { repoFullName: "owner/repo", prNumber: 31, headSha: "cafebabe", previewFromChecks: true, defaultBranchRef: "main" },
+      ["apps/gittensory-ui/src/routes/app.index.tsx"],
+      undefined,
+      { actionsFallback: true },
+    );
+
+    expect(result.routes[0]?.afterUrl).toBeUndefined();
+  });
+
   it("falls back to the loading placeholder when actions_fallback is enabled but no shot has landed in R2 yet", async () => {
     vi.stubGlobal("fetch", stubNoPreviewFound());
     const env = createTestEnv({
