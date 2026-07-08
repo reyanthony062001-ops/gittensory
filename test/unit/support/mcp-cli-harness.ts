@@ -332,6 +332,29 @@ export async function startFixtureServer(
       response.end(JSON.stringify({ repoFullName: "owner/repo", agentPaused: body.agentPaused === true, ...(body.autonomy ? { autonomy: body.autonomy } : {}) }));
       return;
     }
+    // Distinct fixture repos for the burden-forecast intelligence slice: one with a
+    // cached forecast and one without, so both branches of the stdio proxy are covered.
+    if (request.url === "/v1/repos/acme/widgets/intelligence" && request.method === "GET") {
+      response.end(
+        JSON.stringify({
+          status: "ready",
+          source: "snapshot",
+          repoFullName: "acme/widgets",
+          generatedAt: "2026-05-30T00:00:00.000Z",
+          burdenForecast: {
+            projectedReviewLoad: { nextSevenDays: 12, trend: "rising" },
+            queueGrowthRisk: "elevated",
+            stalePrSignals: [{ pullNumber: 41, ageDays: 9, signal: "no-review-activity" }],
+          },
+          burdenForecastFreshness: { source: "snapshot", generatedAt: "2026-05-30T00:00:00.000Z", ageSeconds: 120, freshness: "fresh" },
+        }),
+      );
+      return;
+    }
+    if (request.url === "/v1/repos/acme/quiet/intelligence" && request.method === "GET") {
+      response.end(JSON.stringify({ status: "ready", source: "snapshot", repoFullName: "acme/quiet", generatedAt: "2026-05-30T00:00:00.000Z" }));
+      return;
+    }
     // #554 gate precision telemetry (read-only). Echoes ?windowDays so the CLI window pass-through is testable.
     if (request.url?.startsWith("/v1/repos/owner/repo/gate-precision") && request.method === "GET") {
       const windowDays = new URL(request.url, "http://localhost").searchParams.get("windowDays");
