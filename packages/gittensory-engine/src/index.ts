@@ -251,6 +251,9 @@ export {
   resolveDuplicateClusterWinnerNumber,
   type DuplicateClaimMember,
 } from "./duplicate-winner.js";
+// Issue-centric RAG query composition (#2320, extracted in #4254): the pure query builder + the shared
+// minimum-query floor; the Vectorize/D1 retrieval backend intentionally stays in the backend.
+export { MIN_QUERY_CHARS, buildIssueRagQuery, type IssueRagQueryInput } from "./issue-rag-query.js";
 export {
   buildPredictedGateVerdict,
   predictedGateNote,
