@@ -204,6 +204,7 @@ export {
   type PromptPacketTextField,
 } from "./prompt-packet.js";
 export * from "./portfolio/queue.js";
+export * from "./portfolio/non-convergence.js";
 export {
   applyAiPolicyFatigueToRankInput,
   createAiPolicyFatigueCacheEntry,
