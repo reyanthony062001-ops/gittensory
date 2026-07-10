@@ -20,6 +20,9 @@ function RootLayout() {
             <Link to="/run-history" className="hover:text-white">
               Run history
             </Link>
+            <Link to="/portfolio" className="hover:text-white">
+              Portfolio
+            </Link>
           </nav>
         </div>
       </header>
