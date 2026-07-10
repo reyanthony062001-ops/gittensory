@@ -1101,9 +1101,10 @@ export type RepositorySettings = {
 
 /** #4110: `request_changes`/`comment` were REMOVED (not just left unused) -- they were fully typed/validated
  *  but `src/queue/processors.ts` only ever branched on `=== "close"`, so setting either in `.gittensory.yml`
- *  silently did nothing. `"close"` is the only value this gate has ever enforced; a legacy config with either
- *  removed value normalizes to the default ("close") with a warning, exactly like any other invalid value. */
-export type ScreenshotTableGateAction = "close";
+ *  silently did nothing. `"close"` is the enforcing value; `"advisory"` (#4540) is REAL wired config, unlike
+ *  the removed pair: the evaluator computes (and the reason reports) the violation, and the close trigger's
+ *  own `action === "close"` branch is exactly what keeps an advisory violation from ever closing the PR. */
+export type ScreenshotTableGateAction = "close" | "advisory";
 
 /** Per-repo config for the before/after screenshot-table gate (#2006). See {@link RepositorySettings.screenshotTableGate}
  *  and `review/screenshot-table-gate.ts` for the normalizer + pure evaluator. */
@@ -1111,6 +1112,11 @@ export type ScreenshotTableGateConfig = {
   enabled: boolean;
   whenLabels: string[];
   whenPaths: string[];
+  /** #4540: viewport x theme completeness matrix, opt-in. When `requireViewports` is non-empty, every
+   *  (viewport, theme) pair must appear as a labeled, image-bearing (before + after) table row in the PR body.
+   *  Empty arrays (the default) leave the gate's behavior byte-identical to pre-#4540. */
+  requireViewports: string[];
+  requireThemes: string[];
   action: ScreenshotTableGateAction;
   message?: string | undefined;
 };

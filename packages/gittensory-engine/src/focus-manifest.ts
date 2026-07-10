@@ -1879,6 +1879,8 @@ function parseSettingsOverride(value: JsonValue | undefined, warnings: string[],
     if (typeof rawGate.enabled === "boolean") sparseGate.enabled = validated.enabled;
     if (Array.isArray(rawGate.whenLabels)) sparseGate.whenLabels = validated.whenLabels;
     if (Array.isArray(rawGate.whenPaths)) sparseGate.whenPaths = validated.whenPaths;
+    if (Array.isArray(rawGate.requireViewports)) sparseGate.requireViewports = validated.requireViewports;
+    if (Array.isArray(rawGate.requireThemes)) sparseGate.requireThemes = validated.requireThemes;
     if (isScreenshotTableGateAction(rawGate.action)) sparseGate.action = validated.action;
     if (typeof rawGate.message === "string" && rawGate.message.trim().length > 0) sparseGate.message = validated.message;
     out.screenshotTableGate = sparseGate;

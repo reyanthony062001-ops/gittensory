@@ -25,10 +25,20 @@ export const DEFAULT_SCREENSHOT_TABLE_GATE: ScreenshotTableGateConfig = {
   enabled: false,
   whenLabels: [],
   whenPaths: [],
+  requireViewports: [],
+  requireThemes: [],
   action: "close",
 };
 
-const VALID_ACTIONS: readonly ScreenshotTableGateAction[] = ["close"];
+// #4540: caps for the viewport/theme requirement lists — a completeness matrix bigger than this is a config
+// mistake, not a real review contract (the documented metagraphed contract is 3 viewports x 2 themes).
+const MAX_MATRIX_ENTRIES = 10;
+const MAX_MATRIX_ENTRY_CHARS = 50;
+
+// "advisory" (#4540) is deliberately a REAL value, unlike the request_changes/comment pair #4110 removed as
+// dead config: the evaluator computes the violation either way, and the close trigger in queue/processors.ts
+// only ever fires on `action === "close"`, so "advisory" surfaces the named gaps without closing the PR.
+const VALID_ACTIONS: readonly ScreenshotTableGateAction[] = ["close", "advisory"];
 
 export function isScreenshotTableGateAction(value: unknown): value is ScreenshotTableGateAction {
   return typeof value === "string" && (VALID_ACTIONS as readonly string[]).includes(value);
@@ -59,10 +69,10 @@ function normalizeStringList(value: unknown, field: string, max: number, maxChar
  *  throws: malformed fields fall back to the default (disabled/empty), matching every other settings normalizer
  *  in this codebase. */
 export function normalizeScreenshotTableGateConfig(input: unknown, warnings: string[]): ScreenshotTableGateConfig {
-  if (input === undefined || input === null) return { ...DEFAULT_SCREENSHOT_TABLE_GATE, whenLabels: [], whenPaths: [] };
+  if (input === undefined || input === null) return { ...DEFAULT_SCREENSHOT_TABLE_GATE, whenLabels: [], whenPaths: [], requireViewports: [], requireThemes: [] };
   if (typeof input !== "object" || Array.isArray(input)) {
     warnings.push("settings.requireScreenshotTable must be an object; using the default (disabled).");
-    return { ...DEFAULT_SCREENSHOT_TABLE_GATE, whenLabels: [], whenPaths: [] };
+    return { ...DEFAULT_SCREENSHOT_TABLE_GATE, whenLabels: [], whenPaths: [], requireViewports: [], requireThemes: [] };
   }
   const record = input as Record<string, unknown>;
   const enabled = typeof record.enabled === "boolean" ? record.enabled : DEFAULT_SCREENSHOT_TABLE_GATE.enabled;
@@ -72,7 +82,7 @@ export function normalizeScreenshotTableGateConfig(input: unknown, warnings: str
   const action = isScreenshotTableGateAction(record.action)
     ? record.action
     : (() => {
-        if (record.action !== undefined) warnings.push(`settings.requireScreenshotTable.action must be "close" (the only supported value; #4110 removed request_changes/comment as dead config surface); using the default "close".`);
+        if (record.action !== undefined) warnings.push(`settings.requireScreenshotTable.action must be "close" or "advisory" (#4110 removed request_changes/comment as dead config surface); using the default "close".`);
         return DEFAULT_SCREENSHOT_TABLE_GATE.action;
       })();
   const message = typeof record.message === "string" && record.message.trim().length > 0 ? record.message.trim() : undefined;
@@ -83,6 +93,8 @@ export function normalizeScreenshotTableGateConfig(input: unknown, warnings: str
     enabled,
     whenLabels: normalizeStringList(record.whenLabels, "whenLabels", MAX_LABELS, MAX_LABEL_CHARS, warnings),
     whenPaths: normalizeStringList(record.whenPaths, "whenPaths", MAX_PATHS, MAX_PATH_CHARS, warnings),
+    requireViewports: normalizeStringList(record.requireViewports, "requireViewports", MAX_MATRIX_ENTRIES, MAX_MATRIX_ENTRY_CHARS, warnings),
+    requireThemes: normalizeStringList(record.requireThemes, "requireThemes", MAX_MATRIX_ENTRIES, MAX_MATRIX_ENTRY_CHARS, warnings),
     action,
     ...(message !== undefined ? { message } : {}),
   };
@@ -168,6 +180,59 @@ export function isScreenshotTableGateInScope(config: ScreenshotTableGateConfig, 
   return labelMatch || pathMatch;
 }
 
+/** One parsed markdown-table body row: its label cell (first cell) plus how many of its cells embed images. */
+type LabeledTableRow = { label: string; imageCells: number };
+
+const IMAGE_CELL_PATTERN = /!\[[^\]]*\]\([^)]+\)|<img\b[^>]*>/i;
+
+/** Collect every markdown table row in `body` as (first-cell label, image-bearing-cell count). Separator rows
+ *  are skipped. Deliberately does NOT track table boundaries: a labeled image-bearing row outside a strict
+ *  header+separator region still counts, matching this module's documented lean — false positives fail toward
+ *  "compliant" and a maintainer can always override by hand. */
+export function collectLabeledTableRows(body: string | null | undefined): LabeledTableRow[] {
+  if (!body) return [];
+  const rows: LabeledTableRow[] = [];
+  for (const line of body.split(/\r?\n/)) {
+    if (!/^\s*\|.*\|\s*$/.test(line) || isMarkdownTableSeparatorRow(line)) continue;
+    const cells = line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|");
+    /* v8 ignore next -- a line matching the `|...|` pattern always splits into at least one cell. */
+    const label = (cells[0] ?? "").trim();
+    const imageCells = cells.filter((cell) => IMAGE_CELL_PATTERN.test(cell)).length;
+    rows.push({ label, imageCells });
+  }
+  return rows;
+}
+
+/**
+ * #4540: the viewport x theme completeness check. Returns the human-readable labels of every required
+ * (viewport, theme) pair that has NO matching table row — a row matches a pair when its FIRST cell contains
+ * both the viewport and the theme as case-insensitive substrings (e.g. "Desktop · Light" matches viewport
+ * "desktop" + theme "light") AND the row carries at least two image-bearing cells (before + after). An empty
+ * `requireViewports` disables the check entirely; an empty `requireThemes` requires viewport rows only.
+ */
+export function findMissingScreenshotMatrixPairs(
+  body: string | null | undefined,
+  requireViewports: string[],
+  requireThemes: string[],
+): string[] {
+  if (requireViewports.length === 0) return [];
+  const rows = collectLabeledTableRows(body);
+  const themes: Array<string | null> = requireThemes.length > 0 ? requireThemes : [null];
+  const missing: string[] = [];
+  for (const viewport of requireViewports) {
+    for (const theme of themes) {
+      const matched = rows.some((row) => {
+        const label = row.label.toLowerCase();
+        if (!label.includes(viewport.toLowerCase())) return false;
+        if (theme !== null && !label.includes(theme.toLowerCase())) return false;
+        return row.imageCells >= 2;
+      });
+      if (!matched) missing.push(theme === null ? viewport : `${viewport} \u00b7 ${theme}`);
+    }
+  }
+  return missing;
+}
+
 export const DEFAULT_SCREENSHOT_CONTRACT_MESSAGE =
   "This pull request changes UI/visual code but its description is missing a before/after screenshot table. " +
   "Every changed page/feature needs a **markdown table** with a before column and an after column, each cell a " +
@@ -185,7 +250,9 @@ const NO_VIOLATION: ScreenshotTableGateResult = { violated: false, reason: null 
 /** PURE evaluator. Off (`enabled: false`) or out-of-scope (no configured label/path match) ⇒ no violation. In
  *  scope AND (no image-bearing table in the body OR an image pasted outside a table OR a committed image file
  *  under a scoped path), UNLESS `botCaptureSatisfied` ⇒ violated, with the configured (or default) templated
- *  message as the reason. */
+ *  message as the reason. With the base checks satisfied, the opt-in #4540 viewport x theme completeness
+ *  matrix (`requireViewports`/`requireThemes`) additionally requires one labeled, image-bearing (before +
+ *  after) table row per required pair, naming every missing pair in the reason. */
 export function evaluateScreenshotTableGate(input: {
   config: ScreenshotTableGateConfig;
   prBody: string | null | undefined;
@@ -206,6 +273,19 @@ export function evaluateScreenshotTableGate(input: {
   const hasTable = hasImageBearingMarkdownTable(input.prBody);
   const outsideTable = hasImageOutsideTable(input.prBody);
   const committedImage = hasCommittedImageFile(input.changedFiles, config.whenPaths);
-  if (hasTable && !outsideTable && !committedImage) return NO_VIOLATION;
-  return { violated: true, reason: config.message ?? DEFAULT_SCREENSHOT_CONTRACT_MESSAGE };
+  if (!hasTable || outsideTable || committedImage) {
+    return { violated: true, reason: config.message ?? DEFAULT_SCREENSHOT_CONTRACT_MESSAGE };
+  }
+  // #4540: with the base evidence checks satisfied, enforce the opt-in viewport x theme completeness matrix.
+  // Missing pairs are NAMED in the reason so a contributor knows exactly which labeled rows to add.
+  const missingPairs = findMissingScreenshotMatrixPairs(input.prBody, config.requireViewports, config.requireThemes);
+  if (missingPairs.length === 0) return NO_VIOLATION;
+  return {
+    violated: true,
+    reason:
+      `${config.message ?? DEFAULT_SCREENSHOT_CONTRACT_MESSAGE}\n\n` +
+      `The screenshot table is missing labeled before/after rows for: ${missingPairs.join(", ")}. ` +
+      "Each required viewport \u00d7 theme pair needs its own table row whose first cell names the pair " +
+      '(for example "Desktop \u00b7 Light") with both a before and an after image in that row.',
+  };
 }

@@ -565,6 +565,8 @@ export function resolveEffectiveSettings(
       enabled: screenshotTableGateOverride.enabled ?? base.enabled,
       whenLabels: screenshotTableGateOverride.whenLabels ?? base.whenLabels,
       whenPaths: screenshotTableGateOverride.whenPaths ?? base.whenPaths,
+      requireViewports: screenshotTableGateOverride.requireViewports ?? base.requireViewports,
+      requireThemes: screenshotTableGateOverride.requireThemes ?? base.requireThemes,
       action: screenshotTableGateOverride.action ?? base.action,
       message: screenshotTableGateOverride.message ?? base.message,
     };

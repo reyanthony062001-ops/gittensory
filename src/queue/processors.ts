@@ -2939,8 +2939,9 @@ async function runAgentMaintenancePlanAndExecute(
   // (markPullRequestVisualCaptureSatisfied, written earlier in this same webhook by maybePublishPrPublicSurface
   // -- see that function's beforeAfter block -- and re-read here on `pr`, which this caller already re-fetched
   // fresh from the DB). Off by default (settings.screenshotTableGate.enabled === false), so the pure evaluator
-  // below is effectively free for the common case. "close" is the only enforcement action this gate has (#4110
-  // removed the dead request_changes/comment surface) -- the check below is the ONLY place that reads `.action`.
+  // below is effectively free for the common case. "close" is the only CLOSE-triggering action (#4110 removed
+  // the dead request_changes/comment surface); "advisory" (#4540) computes the violation but the
+  // `action === "close"` check below -- still the ONLY place that reads `.action` -- keeps it from closing.
   /* v8 ignore next -- defensive: resolveRepositorySettings always populates screenshotTableGate (getRepositorySettings's DB defaults), so this fallback is unreachable in practice. */
   const screenshotTableGateConfig = settings.screenshotTableGate ?? DEFAULT_SCREENSHOT_TABLE_GATE;
   const botCaptureSatisfied = Boolean(pr.headSha) && pr.visualCaptureSatisfiedSha === pr.headSha;

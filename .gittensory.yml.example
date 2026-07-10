@@ -876,7 +876,12 @@ settings:
   #   enabled: false                        # Default: false.
   #   whenLabels: [frontend, visual]         # Default: [] (no label scoping).
   #   whenPaths: ["apps/ui/**", "src/**/*.tsx"]  # Default: [] (no path scoping).
-  #   action: close                          # close is the only supported value. Default: close.
+  #   requireViewports: [Desktop, Tablet, Mobile]  # #4540: viewport x theme completeness matrix. Default: []
+  #   requireThemes: [Light, Dark]           # (not required). Non-empty requireViewports => every
+  #                                          # (viewport, theme) pair needs a labeled table row (first cell
+  #                                          # e.g. "Desktop · Light") with before + after images in that row.
+  #   action: close                          # close (enforcing) or advisory (#4540: reports the named missing
+  #                                          # pairs without ever close-triggering). Default: close.
   #   message: "Custom close reason..."      # Default: null (built-in message).
 
   # Advisory-AI routing (#4364): per-capability opt-in to the local-inference AI_ADVISORY binding for these

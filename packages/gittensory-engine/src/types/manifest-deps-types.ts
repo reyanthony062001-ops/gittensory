@@ -19,13 +19,16 @@ export type CombineStrategy = "single" | "consensus" | "synthesis";
 export type OnMerge = "either" | "both";
 
 // #4110: `request_changes`/`comment` were REMOVED (see src/types.ts's mirror of this type for why) -- `"close"`
-// is the only value this gate has ever enforced.
-export type ScreenshotTableGateAction = "close";
+// is the enforcing value; `"advisory"` (#4540) computes/report the violation without ever closing.
+export type ScreenshotTableGateAction = "close" | "advisory";
 
 export type ScreenshotTableGateConfig = {
   enabled: boolean;
   whenLabels: string[];
   whenPaths: string[];
+  /** #4540: viewport x theme completeness matrix, opt-in — see src/types.ts's mirror of this type. */
+  requireViewports: string[];
+  requireThemes: string[];
   action: ScreenshotTableGateAction;
   message?: string | undefined;
 };

@@ -2894,6 +2894,27 @@ describe("parseFocusManifest settings override + resolveEffectiveSettings", () =
     expect(parsed.warnings).toEqual([]);
   });
 
+  it("wires settings.screenshotTableGate requireViewports/requireThemes as sparse override fields (#4540)", () => {
+    const parsed = parseFocusManifest({ settings: { screenshotTableGate: { requireViewports: ["Desktop", "Mobile"], requireThemes: ["Light"] } } });
+    expect(parsed.settings.screenshotTableGate).toEqual({ requireViewports: ["Desktop", "Mobile"], requireThemes: ["Light"] });
+    expect(parsed.warnings).toEqual([]);
+  });
+
+  it("resolveEffectiveSettings merges the matrix lists per-field without clearing lower-layer values (#4540)", () => {
+    const db = {
+      screenshotTableGate: { enabled: true, whenLabels: ["visual"], whenPaths: [], requireViewports: ["Desktop"], requireThemes: ["Light"], action: "close" },
+    } as unknown as RepositorySettings;
+    const eff = resolveEffectiveSettings(db, parseFocusManifest({ settings: { screenshotTableGate: { requireThemes: ["Light", "Dark"] } } }));
+    expect(eff.screenshotTableGate).toEqual({
+      enabled: true,
+      whenLabels: ["visual"],
+      whenPaths: [],
+      requireViewports: ["Desktop"],
+      requireThemes: ["Light", "Dark"],
+      action: "close",
+    });
+  });
+
   it("resolveEffectiveSettings merges a partial screenshotTableGate override without clearing the lower-layer whenLabels/whenPaths (#2006)", () => {
     const db = { screenshotTableGate: { enabled: false, whenLabels: ["frontend"], whenPaths: ["apps/ui/**"], action: "close" } } as unknown as RepositorySettings;
     const eff = resolveEffectiveSettings(db, parseFocusManifest({ settings: { screenshotTableGate: { enabled: true } } }));
@@ -2903,7 +2924,7 @@ describe("parseFocusManifest settings override + resolveEffectiveSettings", () =
   it("resolveEffectiveSettings falls back to the built-in default when the DB layer has no screenshotTableGate at all (#2006)", () => {
     const db = {} as unknown as RepositorySettings;
     const eff = resolveEffectiveSettings(db, parseFocusManifest({ settings: { screenshotTableGate: { enabled: true } } }));
-    expect(eff.screenshotTableGate).toEqual({ enabled: true, whenLabels: [], whenPaths: [], action: "close" });
+    expect(eff.screenshotTableGate).toEqual({ enabled: true, whenLabels: [], whenPaths: [], requireViewports: [], requireThemes: [], action: "close" });
   });
 
   it("resolveEffectiveSettings keeps the DB layer's enabled/action when the manifest override omits them (#2006)", () => {

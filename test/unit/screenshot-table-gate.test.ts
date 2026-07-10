@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 import {
+  collectLabeledTableRows,
   DEFAULT_SCREENSHOT_CONTRACT_MESSAGE,
   DEFAULT_SCREENSHOT_TABLE_GATE,
   evaluateScreenshotTableGate,
+  findMissingScreenshotMatrixPairs,
   hasCommittedImageFile,
   hasImageBearingMarkdownTable,
   hasImageOutsideTable,
@@ -189,7 +191,7 @@ describe("normalizeScreenshotTableGateConfig", () => {
       { enabled: true, whenLabels: ["frontend", "visual"], whenPaths: ["apps/ui/**"], action: "close", message: "custom text" },
       [],
     );
-    expect(result).toEqual({ enabled: true, whenLabels: ["frontend", "visual"], whenPaths: ["apps/ui/**"], action: "close", message: "custom text" });
+    expect(result).toEqual({ enabled: true, whenLabels: ["frontend", "visual"], whenPaths: ["apps/ui/**"], requireViewports: [], requireThemes: [], action: "close", message: "custom text" });
   });
 
   it("rejects a non-boolean enabled with a warning, falling back to false", () => {
@@ -365,5 +367,153 @@ describe("evaluateScreenshotTableGate", () => {
       });
       expect(result).toEqual({ violated: false, reason: null });
     });
+  });
+});
+
+// ── #4540: viewport x theme completeness matrix ─────────────────────────────────────────────────────────────
+
+const MATRIX_BODY = [
+  "| Viewport | Before | After |",
+  "| --- | --- | --- |",
+  "| Desktop · Light | ![b](https://x/dl-b.png) | ![a](https://x/dl-a.png) |",
+  "| Desktop · Dark | ![b](https://x/dd-b.png) | ![a](https://x/dd-a.png) |",
+  "| Mobile · Light | ![b](https://x/ml-b.png) | ![a](https://x/ml-a.png) |",
+  "| Mobile · Dark | ![b](https://x/md-b.png) | ![a](https://x/md-a.png) |",
+].join("\n");
+
+describe("findMissingScreenshotMatrixPairs (#4540)", () => {
+  it("returns [] when requireViewports is empty (matrix disabled), regardless of themes", () => {
+    expect(findMissingScreenshotMatrixPairs(MATRIX_BODY, [], ["Light"])).toEqual([]);
+    expect(findMissingScreenshotMatrixPairs(null, [], [])).toEqual([]);
+  });
+
+  it("passes when every (viewport, theme) pair has a labeled row with before + after images", () => {
+    expect(findMissingScreenshotMatrixPairs(MATRIX_BODY, ["Desktop", "Mobile"], ["Light", "Dark"])).toEqual([]);
+  });
+
+  it("names every missing pair, viewport-first, matching case-insensitively on the first cell", () => {
+    expect(findMissingScreenshotMatrixPairs(MATRIX_BODY, ["desktop", "TABLET"], ["light", "dark"])).toEqual([
+      "TABLET · light",
+      "TABLET · dark",
+    ]);
+  });
+
+  it("requires viewport rows only when requireThemes is empty", () => {
+    expect(findMissingScreenshotMatrixPairs(MATRIX_BODY, ["Desktop", "Tablet"], [])).toEqual(["Tablet"]);
+  });
+
+  it("does not accept a labeled row with fewer than two image-bearing cells (before-only is incomplete)", () => {
+    const oneImage = ["| Viewport | Before | After |", "| --- | --- | --- |", "| Desktop · Light | ![b](https://x/b.png) | pending |"].join("\n");
+    expect(findMissingScreenshotMatrixPairs(oneImage, ["Desktop"], ["Light"])).toEqual(["Desktop · Light"]);
+  });
+
+  it("does not match a pair whose theme only appears outside the first cell", () => {
+    const wrongCell = ["| Viewport | Before | After |", "| --- | --- | --- |", "| Desktop | ![Light](https://x/b.png) | ![Light](https://x/a.png) |"].join("\n");
+    expect(findMissingScreenshotMatrixPairs(wrongCell, ["Desktop"], ["Light"])).toEqual(["Desktop · Light"]);
+  });
+
+  it("handles a null/empty body as all pairs missing", () => {
+    expect(findMissingScreenshotMatrixPairs(null, ["Desktop"], [])).toEqual(["Desktop"]);
+    expect(findMissingScreenshotMatrixPairs("no tables here", ["Desktop"], [])).toEqual(["Desktop"]);
+  });
+});
+
+describe("collectLabeledTableRows (#4540)", () => {
+  it("collects first-cell labels with image-bearing cell counts, skipping separators and non-table lines", () => {
+    const rows = collectLabeledTableRows(MATRIX_BODY);
+    expect(rows[0]).toEqual({ label: "Viewport", imageCells: 0 });
+    expect(rows[1]).toEqual({ label: "Desktop · Light", imageCells: 2 });
+    expect(rows).toHaveLength(5);
+  });
+
+  it("returns [] for a null or table-free body", () => {
+    expect(collectLabeledTableRows(null)).toEqual([]);
+    expect(collectLabeledTableRows("plain prose")).toEqual([]);
+  });
+});
+
+describe("evaluateScreenshotTableGate with the #4540 matrix", () => {
+  const matrixConfig = config({ enabled: true, requireViewports: ["Desktop", "Mobile"], requireThemes: ["Light", "Dark"] });
+
+  it("passes a complete matrix", () => {
+    const result = evaluateScreenshotTableGate({ config: matrixConfig, prBody: MATRIX_BODY, prLabels: [], changedFiles: ["src/a.tsx"] });
+    expect(result.violated).toBe(false);
+  });
+
+  it("violates with every missing pair NAMED in the reason when the matrix is partial", () => {
+    const partial = MATRIX_BODY.split("\n").slice(0, 4).join("\n"); // Desktop rows only
+    const result = evaluateScreenshotTableGate({ config: matrixConfig, prBody: partial, prLabels: [], changedFiles: [] });
+    expect(result.violated).toBe(true);
+    expect(result.reason).toContain("Mobile · Light");
+    expect(result.reason).toContain("Mobile · Dark");
+    expect(result.reason).not.toContain("Desktop · Light,");
+  });
+
+  it("still reports the BASE violation (no table at all) without the matrix suffix", () => {
+    const result = evaluateScreenshotTableGate({ config: matrixConfig, prBody: "no table", prLabels: [], changedFiles: [] });
+    expect(result.violated).toBe(true);
+    expect(result.reason).toBe(DEFAULT_SCREENSHOT_CONTRACT_MESSAGE);
+  });
+
+  it("prefixes the configured custom message on a matrix violation", () => {
+    const custom = config({ enabled: true, requireViewports: ["Tablet"], message: "See the visual contract." });
+    const result = evaluateScreenshotTableGate({ config: custom, prBody: MATRIX_BODY, prLabels: [], changedFiles: [] });
+    expect(result.violated).toBe(true);
+    expect(result.reason!.startsWith("See the visual contract.")).toBe(true);
+    expect(result.reason).toContain("Tablet");
+  });
+
+  it("keeps the pre-#4540 behavior byte-identical when the matrix lists are empty", () => {
+    const result = evaluateScreenshotTableGate({ config: config({ enabled: true }), prBody: TABLE_BODY, prLabels: [], changedFiles: [] });
+    expect(result).toEqual({ violated: false, reason: null });
+  });
+
+  it("bot capture still satisfies the gate ahead of the matrix check (#4110 precedence)", () => {
+    const result = evaluateScreenshotTableGate({ config: matrixConfig, prBody: "no table", prLabels: [], changedFiles: [], botCaptureSatisfied: true });
+    expect(result.violated).toBe(false);
+  });
+});
+
+describe("advisory action (#4540)", () => {
+  it("accepts advisory as a valid action", () => {
+    expect(isScreenshotTableGateAction("advisory")).toBe(true);
+  });
+
+  it("normalizes an advisory config without warnings", () => {
+    const warnings: string[] = [];
+    const result = normalizeScreenshotTableGateConfig({ enabled: true, action: "advisory" }, warnings);
+    expect(result.action).toBe("advisory");
+    expect(warnings).toEqual([]);
+  });
+
+  it("still rejects unknown actions with the updated guidance", () => {
+    const warnings: string[] = [];
+    expect(normalizeScreenshotTableGateConfig({ action: "hold" }, warnings).action).toBe("close");
+    expect(warnings.some((w) => w.includes('"close" or "advisory"'))).toBe(true);
+  });
+});
+
+describe("normalizeScreenshotTableGateConfig matrix lists (#4540)", () => {
+  it("parses requireViewports/requireThemes, trimming entries", () => {
+    const result = normalizeScreenshotTableGateConfig({ requireViewports: [" Desktop ", "Mobile"], requireThemes: ["Light"] }, []);
+    expect(result.requireViewports).toEqual(["Desktop", "Mobile"]);
+    expect(result.requireThemes).toEqual(["Light"]);
+  });
+
+  it("warns on a non-array requireViewports and keeps it empty", () => {
+    const warnings: string[] = [];
+    expect(normalizeScreenshotTableGateConfig({ requireViewports: "Desktop" }, warnings).requireViewports).toEqual([]);
+    expect(warnings.some((w) => w.includes("requireViewports"))).toBe(true);
+  });
+
+  it("caps the matrix lists at 10 entries and 50 chars per entry", () => {
+    const warnings: string[] = [];
+    const result = normalizeScreenshotTableGateConfig(
+      { requireThemes: Array.from({ length: 12 }, (_, i) => `theme-${i}-${"x".repeat(60)}`) },
+      warnings,
+    );
+    expect(result.requireThemes).toHaveLength(10);
+    expect(result.requireThemes[0]!.length).toBe(50);
+    expect(warnings.some((w) => w.includes("capped at 10"))).toBe(true);
   });
 });

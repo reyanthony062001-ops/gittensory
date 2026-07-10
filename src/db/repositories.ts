@@ -570,7 +570,7 @@ export async function getRepositorySettings(env: Env, fullName: string): Promise
       reviewEvasionLabel: DEFAULT_REVIEW_EVASION_LABEL,
       reviewEvasionComment: true,
       mergeTrainMode: "off",
-      screenshotTableGate: { ...DEFAULT_SCREENSHOT_TABLE_GATE, whenLabels: [], whenPaths: [] },
+      screenshotTableGate: { ...DEFAULT_SCREENSHOT_TABLE_GATE, whenLabels: [], whenPaths: [], requireViewports: [], requireThemes: [] },
     };
   }
   return {
@@ -856,6 +856,8 @@ export async function upsertRepositorySettings(env: Env, settings: Partial<Repos
       screenshotTableGateEnabled: resolved.screenshotTableGate.enabled,
       screenshotTableGateWhenLabelsJson: jsonString(resolved.screenshotTableGate.whenLabels),
       screenshotTableGateWhenPathsJson: jsonString(resolved.screenshotTableGate.whenPaths),
+      screenshotTableGateRequireViewportsJson: jsonString(resolved.screenshotTableGate.requireViewports),
+      screenshotTableGateRequireThemesJson: jsonString(resolved.screenshotTableGate.requireThemes),
       screenshotTableGateAction: resolved.screenshotTableGate.action,
       screenshotTableGateMessage: resolved.screenshotTableGate.message ?? null,
       updatedAt: nowIso(),
@@ -942,6 +944,8 @@ export async function upsertRepositorySettings(env: Env, settings: Partial<Repos
         screenshotTableGateEnabled: resolved.screenshotTableGate.enabled,
         screenshotTableGateWhenLabelsJson: jsonString(resolved.screenshotTableGate.whenLabels),
         screenshotTableGateWhenPathsJson: jsonString(resolved.screenshotTableGate.whenPaths),
+        screenshotTableGateRequireViewportsJson: jsonString(resolved.screenshotTableGate.requireViewports),
+        screenshotTableGateRequireThemesJson: jsonString(resolved.screenshotTableGate.requireThemes),
         screenshotTableGateAction: resolved.screenshotTableGate.action,
         screenshotTableGateMessage: resolved.screenshotTableGate.message ?? null,
         updatedAt: nowIso(),
@@ -7329,6 +7333,8 @@ function parseScreenshotTableGateRow(row: typeof repositorySettings.$inferSelect
     enabled: row.screenshotTableGateEnabled,
     whenLabels: parseJsonStringArray(row.screenshotTableGateWhenLabelsJson),
     whenPaths: parseJsonStringArray(row.screenshotTableGateWhenPathsJson),
+    requireViewports: parseJsonStringArray(row.screenshotTableGateRequireViewportsJson),
+    requireThemes: parseJsonStringArray(row.screenshotTableGateRequireThemesJson),
     action: isScreenshotTableGateAction(row.screenshotTableGateAction) ? row.screenshotTableGateAction : DEFAULT_SCREENSHOT_TABLE_GATE.action,
     ...(row.screenshotTableGateMessage ? { message: row.screenshotTableGateMessage } : {}),
   };

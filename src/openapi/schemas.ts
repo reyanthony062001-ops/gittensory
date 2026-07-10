@@ -788,7 +788,9 @@ export const RepositorySettingsSchema = z
         enabled: z.boolean(),
         whenLabels: z.array(z.string()),
         whenPaths: z.array(z.string()),
-        action: z.enum(["close"]),
+        requireViewports: z.array(z.string()),
+        requireThemes: z.array(z.string()),
+        action: z.enum(["close", "advisory"]),
         message: z.string().optional(),
       })
       .optional(),

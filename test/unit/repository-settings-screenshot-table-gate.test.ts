@@ -9,7 +9,7 @@ describe("repository_settings: screenshotTableGate (#2006)", () => {
   it("getRepositorySettings returns the disabled default for a repo with no DB row at all", async () => {
     const env = createTestEnv();
     const settings = await getRepositorySettings(env, "acme/brand-new-repo");
-    expect(settings.screenshotTableGate).toEqual({ enabled: false, whenLabels: [], whenPaths: [], action: "close" });
+    expect(settings.screenshotTableGate).toEqual({ enabled: false, whenLabels: [], whenPaths: [], requireViewports: [], requireThemes: [], action: "close" });
   });
 
   it("upsertRepositorySettings persists the disabled default when the caller omits screenshotTableGate entirely", async () => {
@@ -27,6 +27,8 @@ describe("repository_settings: screenshotTableGate (#2006)", () => {
         enabled: true,
         whenLabels: ["frontend", "visual"],
         whenPaths: ["apps/ui/**"],
+        requireViewports: [],
+        requireThemes: [],
         action: "close",
         message: "Custom contract text",
       },
@@ -36,6 +38,8 @@ describe("repository_settings: screenshotTableGate (#2006)", () => {
       enabled: true,
       whenLabels: ["frontend", "visual"],
       whenPaths: ["apps/ui/**"],
+      requireViewports: [],
+      requireThemes: [],
       action: "close",
       message: "Custom contract text",
     });
@@ -43,16 +47,16 @@ describe("repository_settings: screenshotTableGate (#2006)", () => {
 
   it("a true read-modify-write caller carries the persisted value forward explicitly (no DB merge)", async () => {
     const env = createTestEnv();
-    await upsertRepositorySettings(env, { repoFullName: "acme/round-trip", screenshotTableGate: { enabled: true, whenLabels: ["visual"], whenPaths: [], action: "close" } });
+    await upsertRepositorySettings(env, { repoFullName: "acme/round-trip", screenshotTableGate: { enabled: true, whenLabels: ["visual"], whenPaths: [], requireViewports: [], requireThemes: [], action: "close" } });
     const settings = await getRepositorySettings(env, "acme/round-trip");
     await upsertRepositorySettings(env, { ...settings, repoFullName: "acme/round-trip" });
     const after = await getRepositorySettings(env, "acme/round-trip");
-    expect(after.screenshotTableGate).toEqual({ enabled: true, whenLabels: ["visual"], whenPaths: [], action: "close" });
+    expect(after.screenshotTableGate).toEqual({ enabled: true, whenLabels: ["visual"], whenPaths: [], requireViewports: [], requireThemes: [], action: "close" });
   });
 
   it("omits `message` entirely when unset (never persists an empty string)", async () => {
     const env = createTestEnv();
-    await upsertRepositorySettings(env, { repoFullName: "acme/no-message", screenshotTableGate: { enabled: true, whenLabels: [], whenPaths: [], action: "close" } });
+    await upsertRepositorySettings(env, { repoFullName: "acme/no-message", screenshotTableGate: { enabled: true, whenLabels: [], whenPaths: [], requireViewports: [], requireThemes: [], action: "close" } });
     const settings = await getRepositorySettings(env, "acme/no-message");
     expect(settings.screenshotTableGate?.message).toBeUndefined();
   });
@@ -85,5 +89,43 @@ describe("repository_settings: screenshotTableGate (#2006)", () => {
     const settings = await getRepositorySettings(env, "acme/non-array-json");
     expect(settings.screenshotTableGate?.whenLabels).toEqual([]);
     expect(settings.screenshotTableGate?.whenPaths).toEqual([]);
+  });
+});
+
+// ── #4540: viewport x theme matrix columns ──────────────────────────────────────────────────────────────────
+
+import { describe as describe4540, expect as expect4540, it as it4540 } from "vitest";
+
+describe4540("repository_settings: screenshotTableGate matrix columns (#4540)", () => {
+  it4540("round-trips requireViewports/requireThemes and the advisory action", async () => {
+    const env = createTestEnv();
+    await upsertRepositorySettings(env, {
+      repoFullName: "acme/matrix",
+      screenshotTableGate: {
+        enabled: true,
+        whenLabels: ["visual"],
+        whenPaths: [],
+        requireViewports: ["Desktop", "Tablet", "Mobile"],
+        requireThemes: ["Light", "Dark"],
+        action: "advisory",
+      },
+    });
+    const settings = await getRepositorySettings(env, "acme/matrix");
+    expect4540(settings.screenshotTableGate).toEqual({
+      enabled: true,
+      whenLabels: ["visual"],
+      whenPaths: [],
+      requireViewports: ["Desktop", "Tablet", "Mobile"],
+      requireThemes: ["Light", "Dark"],
+      action: "advisory",
+    });
+  });
+
+  it4540("defaults both matrix lists to [] for a pre-#4540 row that never set them", async () => {
+    const env = createTestEnv();
+    await upsertRepositorySettings(env, { repoFullName: "acme/legacy-row" });
+    const settings = await getRepositorySettings(env, "acme/legacy-row");
+    expect4540(settings.screenshotTableGate?.requireViewports).toEqual([]);
+    expect4540(settings.screenshotTableGate?.requireThemes).toEqual([]);
   });
 });
