@@ -10,6 +10,9 @@ Two form factors for running `@loopover/miner`: **laptop mode** (single machine,
 | **Setup**        | `npm install -g @loopover/miner` or workspace build                                | `docker build` + `docker run` with env + volume (see below)                       |
 | **Footprint**    | One Node process, local disk for ledgers/queues                                                | One container per worker; scale horizontally by adding containers                 |
 
+For measured CPU/RAM/disk numbers behind that footprint row — laptop-mode cycle cost and fleet-mode per-worker
+cost at N=1 vs N=4 — see [`docs/sizing.md`](docs/sizing.md).
+
 ## Coding-agent provider configuration
 
 For provider selection and the CLI-specific model/timeout overrides, see
