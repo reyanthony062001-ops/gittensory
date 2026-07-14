@@ -622,6 +622,54 @@ candidate, but fatigue-only verdicts merely reduce `potential` (`watch` = 0.7x, 
 shorter fatigue recheck interval. Cache keys normalize repo names to lowercase `owner/name`, record an ISO
 `computedAt`, and are considered fresh for 24 hours.
 
+## Governor primitives
+
+`src/governor/` holds nine pure, side-effect-free decision calculators for the local (miner-side) Governor. Each
+computes a verdict from injected inputs only — it never stores state, schedules, performs I/O, or calls
+`Math.random`; bucket mutation, persistence, and enforcement wiring are the miner-lib wrapper's concern (the same
+engine-pure / miner-lib-stateful split every module uses). Open the named source file for the full API.
+
+- **`rate-limit.ts`** — rolling-window rate limiting + jittered exponential backoff from an injected random
+  source. `evaluateLocalRateLimit(config, bucket, now)` → `LocalRateLimitDecision`, plus `jitteredBackoffMs`.
+  Types: `LocalRateLimitConfig`, `LocalRateBucket`.
+- **`budget-cap.ts`** — cumulative spend / turn / termination-time ceilings combined into one verdict. A sibling
+  to `rate-limit.ts`, not built on it: these are monotonic counters across a whole run, not a resetting window.
+  `evaluateGovernorCaps(limits, usage)` → `GovernorCapReport`. Types: `GovernorCapLimits`, `GovernorCapUsage`,
+  `GovernorCapDimension`.
+- **`self-plagiarism.ts`** — classifies a prospective PR's diff fingerprint against the miner's own recent
+  submissions; sparse or ambiguous timing fails closed (deny), reusing the earliest-wins duplicate-cluster
+  election. `fingerprintFromChangedFiles`, `fingerprintSimilarity`, `selfPlagiarismCheck`. Types:
+  `SelfPlagiarismConfig`, `OwnSubmissionRecord`, `SelfPlagiarismVerdict`.
+- **`reputation-throttle.ts`** — self-reputation cadence math: a repo's own recent merged-vs-rejected ratio
+  degrades submission cadence toward a floor and restores it on recovery (never a permanent ban), reading local
+  history only. `selfReputationThrottle(...)` → `SelfReputationThrottleDecision`. Types:
+  `SelfReputationThresholds`, `RepoOutcomeHistory`.
+- **`write-rate-limit.ts`** — composes `evaluateLocalRateLimit` with global + per-repo buckets and jittered retry
+  scheduling, returning updated in-memory bucket snapshots. `evaluateWriteRateLimit(...)` → `WriteRateLimitVerdict`
+  (blocked reason in `WriteRateLimitBlockedBy`). Types: `WriteRateLimitPolicies`, `WriteRateLimitBucketStore`.
+- **`run-halt.ts`** — evaluated at each run-loop iteration boundary: composes a non-convergence detector with the
+  budget/turn/termination caps; either signal halts the run until a human clears it (`clearRunLoopHalt`).
+  `evaluateRunLoopHalt(...)` → `RunLoopHaltVerdict`, plus `detectNonConvergence`. Types: `RunLoopHaltReason`,
+  `NonConvergenceSignal`.
+- **`kill-switch.ts`** — the emergency-halt primitive every write-adjacent decision consults FIRST: a GLOBAL env
+  switch (`MINER_KILL_SWITCH_ENV_VAR`) halts every repo at once; a PER-REPO switch (`.loopover-miner.yml`'s
+  `killSwitch.paused`) halts only that repo's queue while the rest of the fleet runs. `resolveMinerKillSwitch(...)`,
+  `isMinerKillSwitchActive`. Types: `MinerKillSwitchScope`.
+- **`action-mode.ts`** — resolves the miner's overall action mode with "safest wins" precedence
+  (`paused > dry_run > live`); a miner with no explicit opt-in anywhere defaults to `dry_run`, never `live` — the
+  deny-by-default floor. `resolveMinerActionMode(...)`, `minerActionModeExecutes(...)`. Types: `MinerActionMode`,
+  `MINER_LIVE_MODE_OPT_IN`.
+- **`chokepoint.ts`** — the single fail-closed decision point every miner write action passes through before
+  executing. `evaluateGovernorChokepoint(input)` composes the other eight into one `GovernorDecision` under a
+  **"safest wins" precedence ladder**: `global kill-switch > per-repo pause > dry-run > rate-limit >
+  budget/turn/termination cap > non-convergence > self-reputation throttle > self-plagiarism > allow`. The most
+  restrictive signal decides, and any stage that throws denies immediately (`stage: "internal_error"`) rather than
+  falling through to `allow`. Types: `GovernorChokepointInput`, `GovernorDecisionStage`.
+
+These modules compute the *decisions*; the append-only record of what was decided is the separate *storage* contract
+in [Governor ledger](#governor-ledger) below (`allowed` / `denied` / `throttled` / `kill_switch`), which the
+chokepoint's returned ledger event feeds.
+
 ## Governor ledger
 
 `normalizeGovernorLedgerEvent` validates append-only governor decision rows before the local miner persists them.
