@@ -7,6 +7,7 @@ import {
   buildPublicPrPanelSignalRows,
   buildPublicSafeCollapsibles,
   buildQueueHealth,
+  contributorNextStepsBody,
   detectGittensorContributor,
 } from "../../src/signals/engine";
 import { buildUnifiedCommentBody } from "../../src/review/unified-comment-bridge";
@@ -168,6 +169,39 @@ describe("converged comment ↔ legacy panel parity (#unified-comment)", () => {
     // The "Contributor next steps" body is single-sourced with the legacy panel's deduped next-steps list.
     const nextSteps = collapsibles.find((section) => section.title === "Contributor next steps")!;
     expect(nextSteps.body.length).toBeGreaterThan(0);
+  });
+
+  describe("contributorNextStepsBody redesign (#5097)", () => {
+    it("leads with a prioritized 'Start here' step and points to the table for the rest", () => {
+      expect(contributorNextStepsBody(["Add a linked issue.", "Fix the failing check.", "Add tests."])).toEqual([
+        "- **Start here:** Add a linked issue.",
+        "- Then work through the remaining 2 steps in the Signals table above.",
+      ]);
+    });
+
+    it("uses the singular 'step' when exactly one remains", () => {
+      expect(contributorNextStepsBody(["Add a linked issue.", "Fix the failing check."])).toEqual([
+        "- **Start here:** Add a linked issue.",
+        "- Then work through the remaining 1 step in the Signals table above.",
+      ]);
+    });
+
+    it("shows only the single step when there is exactly one", () => {
+      expect(contributorNextStepsBody(["Add a linked issue."])).toEqual(["- **Start here:** Add a linked issue."]);
+    });
+
+    it("dedupes repeated steps before prioritizing", () => {
+      expect(contributorNextStepsBody(["Add tests.", "Add tests.", "Fix the check."])).toEqual([
+        "- **Start here:** Add tests.",
+        "- Then work through the remaining 1 step in the Signals table above.",
+      ]);
+    });
+
+    it("falls back to the generic line when there are no steps at all", () => {
+      expect(contributorNextStepsBody([])).toEqual([
+        "- Keep the PR focused and include validation evidence before maintainer review.",
+      ]);
+    });
   });
 
   it("the legacy panel still renders 'Maintainer notes' inline (private section is unchanged, just not shared)", () => {

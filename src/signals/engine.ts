@@ -4261,9 +4261,22 @@ function reviewContextBody(args: PublicSafeCollapsibleArgs): string[] {
   ];
 }
 
-/** "Contributor next steps" body — the deduped actionable steps (or a fallback when none). */
-function contributorNextStepsBody(nextSteps: string[]): string[] {
-  return nextSteps.length > 0 ? [...new Set(nextSteps)].map((step) => `- ${step}`) : ["- Keep the PR focused and include validation evidence before maintainer review."];
+/** "Contributor next steps" body (#5097). The Signals table's own Action column already lists every one of these
+ *  actions verbatim, so a flat re-listing here added nothing a reader hadn't already seen — which is why it read
+ *  as low-value. Instead this leads with the single highest-priority step as a "Start here" synthesis (the one
+ *  thing the flat table does not say) and points back to the table for the remainder, so the underlying signal
+ *  (`publicSafeNextSteps`: the maintainer-lane note, the readiness actions, the finding actions) is preserved in
+ *  full above while this collapsible finally earns its place. Falls back to the generic line when there are no
+ *  steps at all. */
+export function contributorNextStepsBody(nextSteps: string[]): string[] {
+  const deduped = [...new Set(nextSteps)];
+  if (deduped.length === 0) return ["- Keep the PR focused and include validation evidence before maintainer review."];
+  const [first, ...rest] = deduped;
+  if (rest.length === 0) return [`- **Start here:** ${first}`];
+  return [
+    `- **Start here:** ${first}`,
+    `- Then work through the remaining ${rest.length} step${rest.length === 1 ? "" : "s"} in the Signals table above.`,
+  ];
 }
 
 /** #5096: one reusable convention for EXPERIMENTAL ("beta") collapsibles in the public PR comment, so a reader
@@ -4590,7 +4603,7 @@ export function buildPublicPrIntelligenceComment(args: {
     "<details>",
     "<summary>Contributor next steps</summary>",
     "",
-    ...(nextSteps.length > 0 ? [...new Set(nextSteps)].map((step) => `- ${step}`) : ["- Keep the PR focused and include validation evidence before maintainer review."]),
+    ...contributorNextStepsBody(nextSteps),
     "",
     "</details>",
     "",
