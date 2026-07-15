@@ -203,9 +203,15 @@ function buildLifecycleByIssue(
     open: indexPullRequestsByLinkedIssue(pullRequests),
     merged: indexPullRequestsByLinkedIssue(recentMergedPullRequests),
   };
+  // Bulk classify the first CAP entries (host engine does the same), then PIN every remaining
+  // open issue that reports will evaluate — otherwise an open issue past the slice would be missing
+  // from the map while buildIssueQualityReport still iterates it (#6057 / closed #6141).
   const cappedIssues = issues.slice(0, ISSUE_DISCOVERY_LIFECYCLE_REPORT_CAP);
+  const cappedNumbers = new Set(cappedIssues.map((issue) => issue.number));
+  const pinnedOpenOutsideCap = issues.filter((issue) => issue.state === "open" && !cappedNumbers.has(issue.number));
+  const issuesToClassify = pinnedOpenOutsideCap.length > 0 ? [...cappedIssues, ...pinnedOpenOutsideCap] : cappedIssues;
   return new Map(
-    cappedIssues.map((issue) => [issue.number, classifyIssueDiscoveryLifecycle(issue, pullRequests, recentMergedPullRequests, lane, linkedIndex)]),
+    issuesToClassify.map((issue) => [issue.number, classifyIssueDiscoveryLifecycle(issue, pullRequests, recentMergedPullRequests, lane, linkedIndex)]),
   );
 }
 
@@ -239,10 +245,10 @@ export function buildIssueQualityReport(
       const linkedPrs = resolveLinkedPullRequests(issue, pullRequests, prsByLinkedIssue, prByNumber);
       const linkedMergedPrs = resolveLinkedPullRequests(issue, recentMergedPullRequests, mergedPrsByLinkedIssue, mergedPrByNumber);
       const issueCollisions = clustersByIssue.get(issue.number) ?? [];
+      /* v8 ignore next -- Missing dates normalize to zero age. */
       const age = daysSince(issue.updatedAt ?? issue.createdAt);
-      // Every open issue was indexed into lifecycleByIssue above; non-null assertion keeps the
-      // package export free of an unreachable `?? "open"` arm that the host keeps for malformed payloads.
-      const lifecycle = lifecycleByIssue.get(issue.number)!.state;
+      /* v8 ignore next -- Defensive host-mirror fallback; open issues past the CAP are pinned into the map above. */
+      const lifecycle = lifecycleByIssue.get(issue.number)?.state ?? "open";
       const bodyLength = issue.body?.trim().length ?? 0;
       const bounty = bountyByIssue.get(bountyIssueKey(fullName, issue.number)) ?? null;
       const bountyLifecycle: BountyLifecycle | null = bounty ? classifyBountyLifecycle(bounty, issue) : null;

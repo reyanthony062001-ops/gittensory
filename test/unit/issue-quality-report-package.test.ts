@@ -406,4 +406,20 @@ describe("buildIssueQualityReport (#6057 package-local export)", () => {
     const report = buildIssueQualityReport(r, [issue(r.fullName, 93, "Plain", { labels: [] })], [], r.fullName);
     expect(report.issues[0]?.status).toBe("ready");
   });
+
+  it("does not throw when an open issue sits past the lifecycle CAP, and still classifies it (#6141)", () => {
+    const r = issueDiscoveryRepo("acme/cap");
+    // 300 closed filler issues occupy the bulk slice; the 301st is open + duplicate and must:
+    // 1) not throw on lifecycleByIssue.get(...).state
+    // 2) be pinned into classification so duplicate → do_not_use (not silently "open")
+    const filler = Array.from({ length: 300 }, (_, i) =>
+      issue(r.fullName, i + 1, `Closed ${i + 1}`, { state: "closed", body: "x".repeat(220) }),
+    );
+    const beyondCap = issue(r.fullName, 301, "Beyond cap duplicate", { labels: ["duplicate"], body: "x".repeat(220) });
+    expect(() => buildIssueQualityReport(r, [...filler, beyondCap], [], r.fullName)).not.toThrow();
+    const report = buildIssueQualityReport(r, [...filler, beyondCap], [], r.fullName);
+    expect(report.issues).toHaveLength(1);
+    expect(report.issues[0]).toMatchObject({ number: 301, status: "do_not_use" });
+    expect(report.issues[0]?.warnings.some((w) => /duplicate/i.test(w))).toBe(true);
+  });
 });
