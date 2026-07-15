@@ -185,6 +185,13 @@ export interface ChunkOpts {
 export function chunkFile(path: string, text: string, namespace = "", opts?: ChunkOpts): RagChunk[] {
   const kind = classifyRepoFile(path);
   if (kind === "skip" || !text.trim()) return [];
+  // Strip Unicode control characters (excluding tab/LF/CR, meaningful in source text) before any chunk
+  // is built. Postgres TEXT columns hard-reject a literal NUL byte ("invalid byte sequence for encoding
+  // UTF8: 0x00") -- TextDecoder passes NUL through unchanged (it's valid UTF-8), so a file containing
+  // one poisoned every chunk built from it, permanently: blob_sha only advances on success, so the same
+  // file re-failed the whole upsert batch (up to 49 otherwise-good chunks rolled back with it) on every
+  // push and cron retry (GITTENSORY-D).
+  text = text.replace(/(?![\t\n\r])\p{Cc}/gu, " ");
   // Clamp to safe ranges: chunkChars must be >= 1 (a 0/negative budget makes newlineChunks loop forever on an
   // oversized file — a misconfig DOS) and overlap must be < chunkChars (else `end - overlap` can't advance).
   // (#rag-verify infinite-loop guard)

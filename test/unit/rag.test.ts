@@ -195,6 +195,20 @@ describe("rag: per-file chunking", () => {
     expect(chunkFile("src/a.ts", "   ")).toEqual([]);
   });
 
+  it("REGRESSION (GITTENSORY-D): strips a NUL byte instead of letting it reach the chunk (Postgres TEXT columns reject it outright)", () => {
+    const chunks = chunkFile("src/a.ts", "export const x = 1;\0\n");
+    expect(chunks).toHaveLength(1);
+    expect(chunks[0]?.text.includes("\0")).toBe(false);
+    expect(chunks[0]?.text).toBe("export const x = 1; \n");
+  });
+
+  it("REGRESSION (GITTENSORY-D): strips other control characters too, but preserves tab/newline/CR (meaningful in source text)", () => {
+    const text = chunkFile("src/a.ts", "export const x = 1;\t// SOH:\x01 US:\x1f DEL:\x7f\r\n")[0]?.text ?? "";
+    expect(text).not.toMatch(/[\x01\x1f\x7f]/);
+    expect(text).toContain("\t");
+    expect(text).toContain("\r\n");
+  });
+
   it("REGRESSION (#4996): filters out an individual whitespace-only chunk, even though the whole file is non-empty (the most plausible cause of production ai_embed_http_400s)", () => {
     // chunkChars=10, overlap=0: chunk0 = 10 X's, chunk1 = 10 SPACES (whitespace-only -- must be dropped),
     // chunk2 = 10 Y's. Non-JS path (.py) so this exercises newlineChunks, the chunker actually used in prod
