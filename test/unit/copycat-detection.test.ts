@@ -193,6 +193,31 @@ describe("runCopycatAssessment", () => {
     expect(result.wouldAct).toBe(false);
   });
 
+  it("REGRESSION (perf/copycat-parallel-candidate-fetch): fetches each phase's candidate files CONCURRENTLY, not one listPullRequestFiles round-trip at a time", async () => {
+    const env = createTestEnv();
+    let inFlight = 0;
+    let maxInFlight = 0;
+    vi.spyOn(repositoriesModule, "listPullRequestFiles").mockImplementation(async () => {
+      inFlight += 1;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 5)); // hold the window open long enough for others to overlap
+      inFlight -= 1;
+      return [];
+    });
+    const manyOpenSiblings = Array.from({ length: 5 }, (_, i) => openSibling(i + 1, "2026-06-01T00:00:00Z"));
+
+    await runCopycatAssessment(env, {
+      repoFullName: REPO,
+      pr: { number: 100, createdAt: "2026-06-05T00:00:00Z" },
+      files: [file(100, "src/copy.ts", "+some content")],
+      otherOpenPullRequests: manyOpenSiblings,
+      mode: "block",
+      minScore: null,
+    });
+
+    expect(maxInFlight).toBeGreaterThan(1); // proves real overlap -- not the old strictly-sequential loop
+  });
+
   it("degrades a failed recently-merged lookup to an empty candidate list (fail-safe) instead of throwing", async () => {
     const env = createTestEnv();
     vi.spyOn(repositoriesModule, "listRecentMergedPullRequests").mockRejectedValueOnce(new Error("D1 read error"));

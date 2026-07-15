@@ -61,26 +61,36 @@ export async function runCopycatAssessment(
     minScore: RepositorySettings["copycatGateMinScore"];
   },
 ): Promise<CopycatAssessment> {
-  const priorArt: CopycatPriorArtCandidate[] = [];
-
+  // Each phase's candidate list is already bounded by MAX_COPYCAT_CANDIDATES (25) before any fetch starts, so
+  // fetching every candidate's files CONCURRENTLY within a phase (rather than one listPullRequestFiles round-
+  // trip at a time, up to 50 sequential DB reads total across both phases) does not raise the worst-case fan-
+  // out -- it only removes the artificial serialization between independent reads. Promise.all preserves each
+  // phase's original candidate order in its result array regardless of resolution order, so priorArt's
+  // ordering (open siblings first, then merged) is unchanged.
   const openCandidates = args.otherOpenPullRequests.slice(0, MAX_COPYCAT_CANDIDATES);
-  for (const sibling of openCandidates) {
-    const files = await listPullRequestFiles(env, args.repoFullName, sibling.number).catch(() => []);
-    priorArt.push({ pullNumber: sibling.number, lines: comparableAddedLines(files), submittedAt: sibling.createdAt });
-  }
+  const openPriorArt: CopycatPriorArtCandidate[] = await Promise.all(
+    openCandidates.map(async (sibling) => {
+      const files = await listPullRequestFiles(env, args.repoFullName, sibling.number).catch(() => []);
+      return { pullNumber: sibling.number, lines: comparableAddedLines(files), submittedAt: sibling.createdAt };
+    }),
+  );
 
-  const remainingBudget = MAX_COPYCAT_CANDIDATES - priorArt.length;
+  let mergedPriorArt: CopycatPriorArtCandidate[] = [];
+  const remainingBudget = MAX_COPYCAT_CANDIDATES - openPriorArt.length;
   if (remainingBudget > 0) {
     const changedPathSet = new Set(args.files.map((file) => file.path));
     const recentMerged = await listRecentMergedPullRequests(env, args.repoFullName).catch(() => []);
     const overlapping = recentMerged
       .filter((candidate) => candidate.changedFiles.some((path) => changedPathSet.has(path)))
       .slice(0, remainingBudget);
-    for (const candidate of overlapping) {
-      const files = await listPullRequestFiles(env, args.repoFullName, candidate.number).catch(() => []);
-      priorArt.push({ pullNumber: candidate.number, lines: comparableAddedLines(files), submittedAt: candidate.mergedAt });
-    }
+    mergedPriorArt = await Promise.all(
+      overlapping.map(async (candidate) => {
+        const files = await listPullRequestFiles(env, args.repoFullName, candidate.number).catch(() => []);
+        return { pullNumber: candidate.number, lines: comparableAddedLines(files), submittedAt: candidate.mergedAt };
+      }),
+    );
   }
+  const priorArt = [...openPriorArt, ...mergedPriorArt];
 
   return assessCopycat({
     candidateLines: comparableAddedLines(args.files),
