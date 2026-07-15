@@ -277,6 +277,19 @@ describe("contribution lane output — public-safe via deriveContributionLanes",
     expect(JSON.stringify(lanes)).not.toMatch(FORBIDDEN_POLICY_PATTERN);
   });
 
+  it("still surfaces safe wanted paths in PR guidance when the manifest mixes in a public-unsafe path", () => {
+    // A single public-unsafe wantedPaths entry must not drop the whole "Focus changes on maintainer-wanted
+    // areas" line via the all-or-nothing public-safety filter: the interpolation is built from the filtered
+    // safe paths, so the safe path still surfaces and the unsafe one never appears.
+    const manifest = parseFocusManifest({ wantedPaths: ["src/", "reward-farming/"] });
+    const lanes = deriveContributionLanes(manifest);
+    const focusLine = lanes.prEntryGuidance.find((entry) => entry.startsWith("Focus changes on maintainer-wanted areas:"));
+    expect(focusLine).toBeDefined();
+    expect(focusLine).toContain("src/");
+    expect(focusLine).not.toContain("reward-farming/");
+    expect(JSON.stringify(lanes)).not.toMatch(FORBIDDEN_POLICY_PATTERN);
+  });
+
   it("emits a warning when contribution scope is unclear", () => {
     const manifest = parseFocusManifest({ wantedPaths: [], preferredLabels: [], issueDiscoveryPolicy: "encouraged" });
     const lanes = deriveContributionLanes(manifest);

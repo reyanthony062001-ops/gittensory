@@ -872,7 +872,7 @@ export function deriveContributionLanes(manifest: FocusManifest): ContributionLa
 
   const prEntryGuidance: string[] = [];
   if (safeWanted.length > 0) {
-    prEntryGuidance.push(`Focus changes on maintainer-wanted areas: ${manifest.wantedPaths.slice(0, 5).join(", ")}.`);
+    prEntryGuidance.push(`Focus changes on maintainer-wanted areas: ${safeWanted.slice(0, 5).join(", ")}.`);
   }
   if (manifest.preferredLabels.length > 0) {
     const safeLabels = manifest.preferredLabels.filter(isFocusManifestPublicSafe);
