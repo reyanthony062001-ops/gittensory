@@ -27,6 +27,18 @@ describe("loopover-miner hooks check command", () => {
     });
   });
 
+  it("parseDenyCheckArgs rejects a flag consumed as another flag's value (#5833)", () => {
+    // --tool/--input must not swallow an adjacent flag as their value; each reports the specific
+    // "Missing value" error rather than falling through to the generic usage string.
+    expect(parseDenyCheckArgs(["--tool"])).toEqual({ error: "Missing value for --tool." });
+    expect(parseDenyCheckArgs(["--tool", "--input", "{}"])).toEqual({ error: "Missing value for --tool." });
+    expect(parseDenyCheckArgs(["--name", "--json"])).toEqual({ error: "Missing value for --tool." });
+    expect(parseDenyCheckArgs(["--tool", "Write", "--input"])).toEqual({ error: "Missing value for --input." });
+    expect(parseDenyCheckArgs(["--tool", "Write", "--input", "--json"])).toEqual({
+      error: "Missing value for --input.",
+    });
+  });
+
   it("runDenyCheck exits 1 when a built-in rule blocks the call", () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => undefined);
     expect(

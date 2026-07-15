@@ -34,12 +34,14 @@ export function parseDenyCheckArgs(args) {
     }
     if (token === "--tool" || token === "--name") {
       const tool = args[++index];
-      if (!tool) return { error: "Missing value for --tool." };
+      if (!tool || tool.startsWith("-")) return { error: "Missing value for --tool." };
       options.tool = tool;
       continue;
     }
     if (token === "--input") {
-      const parsed = parseToolInput(args[++index]);
+      const raw = args[++index];
+      if (!raw || raw.startsWith("-")) return { error: "Missing value for --input." };
+      const parsed = parseToolInput(raw);
       if ("error" in parsed) return { error: parsed.error };
       options.input = parsed.value;
       continue;
