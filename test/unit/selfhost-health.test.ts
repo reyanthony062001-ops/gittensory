@@ -8,6 +8,8 @@ import {
   backupAcknowledgedGaugeValue,
   buildHealthBody,
   codexAuthReadinessProbe,
+  emptyConfigDirAcknowledgedGaugeValue,
+  emptyConfigDirAdvisory,
   githubAppReadinessProbe,
   publicOriginAcknowledgedGaugeValue,
   publicOriginReachabilityAdvisory,
@@ -308,6 +310,35 @@ describe("publicOriginAcknowledgedGaugeValue (#4180)", () => {
     expect(
       publicOriginAcknowledgedGaugeValue({ publicApiOrigin: "https://reviews.example.com", publicSiteOrigin: undefined, acknowledged: false }),
     ).toBe(1);
+  });
+});
+
+describe("emptyConfigDirAdvisory (gittensory->loopover rename incident)", () => {
+  it("is silent when LOOPOVER_REPO_CONFIG_DIR is unset entirely — a normal, unconfigured install", () => {
+    expect(emptyConfigDirAdvisory({ configured: false, entryCount: 0, acknowledged: false })).toBeNull();
+  });
+
+  it("is silent when the mounted directory has at least one entry", () => {
+    expect(emptyConfigDirAdvisory({ configured: true, entryCount: 1, acknowledged: false })).toBeNull();
+  });
+
+  it("is silent when acknowledged, even if configured and empty", () => {
+    expect(emptyConfigDirAdvisory({ configured: true, entryCount: 0, acknowledged: true })).toBeNull();
+  });
+
+  it("regression: warns when configured but the mounted directory is empty — the exact incident shape", () => {
+    const message = emptyConfigDirAdvisory({ configured: true, entryCount: 0, acknowledged: false });
+    expect(message).toMatch(/mounted directory is empty/);
+    expect(message).toMatch(/CONFIG_DIR_EMPTY_ACKNOWLEDGED/);
+  });
+});
+
+describe("emptyConfigDirAcknowledgedGaugeValue (gittensory->loopover rename incident)", () => {
+  it("mirrors the advisory: 0 only when configured and empty and unacknowledged", () => {
+    expect(emptyConfigDirAcknowledgedGaugeValue({ configured: true, entryCount: 0, acknowledged: false })).toBe(0);
+    expect(emptyConfigDirAcknowledgedGaugeValue({ configured: true, entryCount: 0, acknowledged: true })).toBe(1);
+    expect(emptyConfigDirAcknowledgedGaugeValue({ configured: true, entryCount: 1, acknowledged: false })).toBe(1);
+    expect(emptyConfigDirAcknowledgedGaugeValue({ configured: false, entryCount: 0, acknowledged: false })).toBe(1);
   });
 });
 

@@ -44,6 +44,10 @@ if [ "$1" = "inspect" ] && [ "$2" = "--format" ]; then
   fi
   exit 0
 fi
+if [ "$1" = "exec" ]; then
+  printf '%s\\n' "\${CONFIG_DIR_ENTRIES:-3}"
+  exit 0
+fi
 exit 0
 `,
   );
@@ -99,5 +103,20 @@ describe("selfhost-post-update-check.sh", () => {
 
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("after 2 attempts (6s)");
+  });
+
+  it("regression: warns (without failing) when the container's private config mount is empty", () => {
+    const result = run({ CONFIG_DIR_ENTRIES: "0" });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr).toContain("private config directory (LOOPOVER_REPO_CONFIG_DIR, default /config) is empty");
+    expect(result.stdout).toContain("selfhost post-update check: ok");
+  });
+
+  it("is silent when the container's private config mount has entries", () => {
+    const result = run({ CONFIG_DIR_ENTRIES: "4" });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stderr).not.toContain("private config directory");
   });
 });

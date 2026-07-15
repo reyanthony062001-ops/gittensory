@@ -6,7 +6,7 @@
 // Serves the Hono app via @hono/node-server, drives the queue with the same processJob, ticks the same
 // scheduled handler on a timer, exposes /health /ready /metrics, and shuts down gracefully. The Cloudflare
 // Worker (src/index.ts) is untouched — this is a parallel entry the self-host esbuild build bundles.
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
 import { randomUUID } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
@@ -48,6 +48,8 @@ import {
   backupAcknowledgedGaugeValue,
   buildHealthBody,
   codexAuthReadinessProbe,
+  emptyConfigDirAcknowledgedGaugeValue,
+  emptyConfigDirAdvisory,
   githubAppReadinessProbe,
   publicOriginAcknowledgedGaugeValue,
   publicOriginReachabilityAdvisory,
@@ -111,6 +113,16 @@ import type { JobMessage } from "./types";
 function nonBlank(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+/** Top-level entry count of `dir` (files + subdirectories, dotfiles included), or 0 on any read error --
+ *  a missing/unreadable directory is reported the same as an empty one rather than crashing boot. */
+function safeReaddirCount(dir: string): number {
+  try {
+    return readdirSync(dir).length;
+  } catch {
+    return 0;
+  }
 }
 
 
@@ -298,15 +310,36 @@ async function main(): Promise<void> {
   // Boot-time visibility (config-drift guardrail): state which config dir is actually in effect, unconditionally
   // -- neither reader above logs anything, so an operator previously had no way to confirm from the logs alone
   // which directory (if any) was live, which is exactly the ambiguity that let a stale, no-longer-mounted config
-  // path get mistaken for the real one during a past incident. Never touches or validates any file; this is
-  // purely a log line, same "state what's in effect" shape as the sentry/otel boot logs below.
+  // path get mistaken for the real one during a past incident. `entryCount` is a cheap, one-time top-level
+  // listing (never recursive, never touches file contents) so a SECOND incident of the same shape -- the mount
+  // resolving but landing on an empty directory -- is visible in the log line itself, not just "some path is
+  // configured" (see emptyConfigDirAdvisory below for the loud version of this same signal).
+  const configDirOpts = {
+    configured: Boolean(repoConfigDir),
+    // A missing (as opposed to merely empty) directory is treated the same as zero entries -- both mean "no
+    // local config was actually read" -- rather than letting a bad path crash the whole server at boot.
+    entryCount: repoConfigDir ? safeReaddirCount(repoConfigDir) : 0,
+    acknowledged: process.env.CONFIG_DIR_EMPTY_ACKNOWLEDGED === "true",
+  };
   console.log(
     JSON.stringify({
       event: "selfhost_config_dir",
-      configured: Boolean(repoConfigDir),
+      configured: configDirOpts.configured,
       dir: repoConfigDir ?? null,
+      entryCount: repoConfigDir ? configDirOpts.entryCount : null,
     }),
   );
+  // Config-drift advisory: warn LOUDLY (not just the log line above) when the mount resolves but is empty --
+  // see emptyConfigDirAdvisory's own doc comment for the incident this guards against.
+  const configDirAdvisory = emptyConfigDirAdvisory(configDirOpts);
+  if (configDirAdvisory)
+    console.warn(
+      JSON.stringify({
+        level: "warn",
+        event: "selfhost_config_dir_empty_advisory",
+        message: configDirAdvisory,
+      }),
+    );
   // Error tracking (#1468): opt-in via SENTRY_DSN — a complete no-op when unset. When on, capture uncaught crashes
   // + unhandled rejections (flush before exit for the fatal case); per-subsystem captures (queue dead-letter,
   // review failures) are wired at their sites.
@@ -781,6 +814,7 @@ async function main(): Promise<void> {
   );
   gauge("loopover_backup_acknowledged", () => backupAcknowledgedGaugeValue(sqliteBackupOpts));
   gauge("loopover_public_origin_acknowledged", () => publicOriginAcknowledgedGaugeValue(publicOriginOpts));
+  gauge("loopover_config_dir_empty_acknowledged", () => emptyConfigDirAcknowledgedGaugeValue(configDirOpts));
   // Pre-initialize job counters to 0 so they appear in the first Prometheus scrape (lazy counters
   // created on first use would otherwise cause "No data" in Grafana until the first job event).
   for (const c of [

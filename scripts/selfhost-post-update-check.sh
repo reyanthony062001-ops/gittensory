@@ -4,7 +4,8 @@
 # Run after deploy-selfhost-image.sh, deploy-selfhost-prebuilt.sh, or any manual
 # `docker compose up -d --no-deps loopover` that ships a new app image.
 #
-# Checks /ready, compose health, .env release metadata, and the running container image.
+# Checks /ready, compose health, .env release metadata, the running container image, and whether the
+# container-private config mount (LOOPOVER_REPO_CONFIG_DIR) is unexpectedly empty.
 # Does not modify .env, volumes, loopover-config/, or any profile service.
 set -euo pipefail
 
@@ -93,4 +94,18 @@ fi
 
 running_image="$(docker inspect --format '{{.Config.Image}}' "$container_id")"
 echo "selfhost post-update check: running image=$running_image"
+
+# Config-drift guardrail (a live incident during the gittensory->loopover rename): docker-compose.yml's
+# LOOPOVER_REPO_CONFIG_DIR bind mount silently degrades to an empty directory -- not an error -- when its host
+# source directory doesn't exist (e.g. renamed/moved without updating the mount, or simply never created). Every
+# per-repo and global setting then falls back to built-in defaults with zero visible symptoms until someone
+# notices the behavior change. This is a READ-ONLY check (matches the file header above: never modifies
+# loopover-config/) run every time this script runs, i.e. after every deploy -- exactly when a mount-path change
+# would land. Non-fatal: an empty mount is also the correct, expected state for a fresh install with no private
+# config written yet, so this warns rather than exits non-zero.
+config_dir_entries="$(docker exec "$container_id" sh -c 'dir="${LOOPOVER_REPO_CONFIG_DIR:-/config}"; [ -d "$dir" ] && ls -A "$dir" | wc -l || echo 0' 2>/dev/null || true)"
+if [[ "$config_dir_entries" =~ ^[0-9]+$ ]] && [ "$config_dir_entries" -eq 0 ]; then
+  echo "selfhost post-update check: warning — the container's private config directory (LOOPOVER_REPO_CONFIG_DIR, default /config) is empty; every per-repo and global setting is silently using built-in defaults. If you expected private config to apply, verify the host directory wasn't renamed or moved without updating docker-compose.yml's bind mount." >&2
+fi
+
 echo "selfhost post-update check: ok"

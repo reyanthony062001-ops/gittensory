@@ -130,6 +130,10 @@ export const SELFHOST_ENV_REFERENCE_ROWS: SelfHostEnvReferenceRow[] = [
     firstReference: "src/selfhost/ai.ts",
   },
   {
+    name: "CONFIG_DIR_EMPTY_ACKNOWLEDGED",
+    firstReference: "src/server.ts",
+  },
+  {
     name: "CRON_INTERVAL_MS",
     firstReference: "src/server.ts",
   },
@@ -513,6 +517,7 @@ export const SELFHOST_ENV_REFERENCE_MARKDOWN = [
   "| `CODEX_AI_MODEL` | `src/selfhost/ai.ts` |",
   "| `CODEX_AI_TIMEOUT_MS` | `src/selfhost/ai.ts` |",
   "| `CODEX_HOME` | `src/selfhost/ai.ts` |",
+  "| `CONFIG_DIR_EMPTY_ACKNOWLEDGED` | `src/server.ts` |",
   "| `CRON_INTERVAL_MS` | `src/server.ts` |",
   "| `DATABASE_PATH` | `src/server.ts` |",
   "| `DATABASE_URL` | `src/selfhost/preflight.ts` |",

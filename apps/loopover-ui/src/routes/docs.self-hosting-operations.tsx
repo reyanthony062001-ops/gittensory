@@ -1142,7 +1142,8 @@ git merge --ff-only origin/main
 curl -sf http://localhost:8787/ready
 docker compose ps loopover
 grep -E '^(LOOPOVER_IMAGE|LOOPOVER_VERSION|SENTRY_RELEASE)=' .env
-docker inspect --format '{{.Config.Image}}' "$(docker compose ps -q loopover)"`}
+docker inspect --format '{{.Config.Image}}' "$(docker compose ps -q loopover)"
+docker exec "$(docker compose ps -q loopover)" sh -c 'ls -A "\${LOOPOVER_REPO_CONFIG_DIR:-/config}" | wc -l'`}
       />
       <p>
         If any check fails, see <Link to="/docs/self-hosting-troubleshooting">Troubleshooting</Link>

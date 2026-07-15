@@ -54,6 +54,7 @@ export const DEFAULT_METRIC_META: readonly (readonly [string, MetricMeta])[] = [
   ["loopover_clock_skew_seconds", { help: "Clock skew in seconds between this process and GitHub's server time (positive = ahead), sampled from GitHub App JWT-mint response Date headers.", type: "gauge" }],
   ["loopover_uptime_seconds", { help: "Self-host process uptime in seconds.", type: "gauge" }],
   ["loopover_backup_acknowledged", { help: "1 when SQLite backup is acknowledged or Postgres is in use; 0 when the boot backup advisory would fire.", type: "gauge" }],
+  ["loopover_config_dir_empty_acknowledged", { help: "1 when LOOPOVER_REPO_CONFIG_DIR is unset, has entries, or is acknowledged; 0 when it's configured but the mounted directory is empty.", type: "gauge" }],
   ["loopover_http_requests_total", { help: "HTTP app requests by response status class.", type: "counter" }],
   ["loopover_http_request_duration_seconds", { help: "HTTP app request duration in seconds.", type: "histogram" }],
   ["loopover_webhook_dedup_total", { help: "Webhook deliveries deduplicated before enqueue.", type: "counter" }],

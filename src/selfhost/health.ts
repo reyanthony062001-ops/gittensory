@@ -231,3 +231,26 @@ export function publicOriginAcknowledgedGaugeValue(opts: {
 }): 0 | 1 {
   return publicOriginReachabilityAdvisory(opts) === null ? 1 : 0;
 }
+
+/** Boot-time advisory (a live incident during the gittensory->loopover rename): `LOOPOVER_REPO_CONFIG_DIR`
+ *  points the focus-manifest loader at a container-private per-repo config mount (`private-config.ts`) that
+ *  silently and validly degrades to "no local config" when the mounted directory is empty — every setting
+ *  (labels, gate, autonomy, ...) then falls back to built-in defaults with NO error, because an empty mount is
+ *  also the correct, expected state for a brand-new install that hasn't written any `.loopover.yml` yet. The
+ *  incident: a docker-compose.yml change renamed the bind-mount source directory convention
+ *  (`./gittensory-config` -> `./loopover-config`) as a documented breaking change requiring operators to `mv`
+ *  their existing directory to match — that manual step was missed on deploy, Docker silently created an empty
+ *  directory at the new path, and every repo's config-driven settings (including `autoLabelEnabled`) reverted
+ *  to defaults for about a day before anyone noticed. Mirrors {@link sqliteBackupAdvisory}'s shape: warns
+ *  rather than blocks (an empty dir is legitimate for a fresh install), and the operator can silence it with
+ *  `CONFIG_DIR_EMPTY_ACKNOWLEDGED=true` once they've confirmed it's intentional. */
+export function emptyConfigDirAdvisory(opts: { configured: boolean; entryCount: number; acknowledged: boolean }): string | null {
+  if (!opts.configured || opts.acknowledged || opts.entryCount > 0) return null;
+  return `LOOPOVER_REPO_CONFIG_DIR is set but the mounted directory is empty — every per-repo and global setting (labels, gate, autonomy, ...) is silently using built-in defaults instead of your .loopover.yml config. This usually means the host directory was renamed or moved without updating the bind mount (see docker-compose.yml's "volumes:" comment), or the volume didn't mount as expected. If this is intentional — a fresh install with no config written yet — set CONFIG_DIR_EMPTY_ACKNOWLEDGED=true to silence this warning.`;
+}
+
+/** Prometheus gauge value mirroring {@link emptyConfigDirAdvisory}: 1 when the mount isn't configured, has
+ *  entries, or the operator acknowledged it, 0 when the advisory would fire. */
+export function emptyConfigDirAcknowledgedGaugeValue(opts: { configured: boolean; entryCount: number; acknowledged: boolean }): 0 | 1 {
+  return emptyConfigDirAdvisory(opts) === null ? 1 : 0;
+}
