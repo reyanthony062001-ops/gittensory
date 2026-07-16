@@ -227,6 +227,13 @@ jobs:
             node_modules
             apps/loopover-ui/node_modules
           key: ${{ steps.node-modules-cache.outputs.cache-primary-key }}
+      # apps/loopover-ui/.source (fumadocs-mdx codegen -- the collections/* alias
+      # apps/loopover-ui/tsconfig.json depends on) lives outside node_modules and is normally produced by
+      # npm ci's own postinstall. A node_modules cache hit above skips npm ci entirely, so .source/ would
+      # otherwise never exist on a cache-hit run. Regenerate it explicitly and unconditionally: cheap,
+      # deterministic, and a harmless no-op re-run of the same postinstall on a cache miss.
+      - name: Generate fumadocs content-collection sources
+        run: npm --workspace @loopover/ui run postinstall
       - name: Lint workflows
         if: ${{ github.event_name == 'push' || needs.changes.outputs.backend == 'true' }}
         run: npm run actionlint
