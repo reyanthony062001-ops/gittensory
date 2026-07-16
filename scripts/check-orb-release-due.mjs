@@ -4,7 +4,7 @@
 // hidden inside this script. See scripts/orb-release-core.mjs for the underlying logic and rationale.
 import { execFileSync } from "node:child_process";
 import { readFileSync, writeFileSync } from "node:fs";
-import { buildOrbReleaseReport } from "./orb-release-core.mjs";
+import { buildOrbReleaseReport, latestOrbTag, latestStableOrbTag } from "./orb-release-core.mjs";
 
 const MANIFEST_PATH = "orb-manifest.json";
 
@@ -13,8 +13,8 @@ function main() {
   const manifestVersion = JSON.parse(readFileSync(MANIFEST_PATH, "utf8")).version;
   const tags = git(["tag", "--list", "orb-v*"]).split("\n").filter(Boolean);
 
-  const stableTagName = latestStableTagName(tags);
-  const anyTagName = latestAnyTagName(tags);
+  const stableTagName = latestStableOrbTag(tags)?.tag ?? null;
+  const anyTagName = latestOrbTag(tags)?.tag ?? null;
 
   const report = buildOrbReleaseReport({
     tags,
@@ -30,25 +30,6 @@ function main() {
   if (!args.json && !args.output) {
     process.stdout.write(report.due ? `ORB beta due: ${report.nextTag}\n` : "No ORB beta due.\n");
   }
-}
-
-// Re-derives the same two "latest tag" views orb-release-core.mjs computes internally, purely so this CLI can
-// pick the right git revision range for each -- kept here (not exported from the core module) since it's a
-// git-log concern, not a pure-logic one.
-function latestStableTagName(tags) {
-  const stable = tags.filter((tag) => /^orb-v\d+\.\d+\.\d+$/.test(tag));
-  return stable.sort(compareTagsDesc)[0] ?? null;
-}
-
-function latestAnyTagName(tags) {
-  const versioned = tags.filter((tag) => /^orb-v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/.test(tag));
-  return versioned.sort(compareTagsDesc)[0] ?? null;
-}
-
-function compareTagsDesc(left, right) {
-  // Lexicographic is good enough here purely to pick a `git log` boundary -- buildOrbReleaseReport does the
-  // real semver-aware comparison for anything that ends up in the report itself.
-  return right.localeCompare(left, undefined, { numeric: true });
 }
 
 function parseArgs(argv) {

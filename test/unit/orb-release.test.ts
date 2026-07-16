@@ -105,6 +105,24 @@ describe("semver helpers", () => {
     expect(latestStableOrbTag(["mcp-v1.0.0", "orb-vgarbage"])).toBeNull();
     expect(latestOrbTag([])).toBeNull();
   });
+
+  // #6294: a same-version beta must never outrank its stable promotion. A lexicographic sort puts
+  // "orb-v1.2.0-beta.10" ahead of "orb-v1.2.0" (the beta suffix string-sorts after its own prefix), which
+  // would pick a stale beta as check-orb-release-due.mjs's git-log boundary once a beta and its stable
+  // promotion point at different commits. Beta tags of a shipped version live in the tag list forever, so
+  // this stays reachable indefinitely.
+  it("latestOrbTag ranks a stable tag ahead of its same-version betas, not lexicographically (#6294)", () => {
+    const tags = ["orb-v1.2.0", "orb-v1.2.0-beta.1", "orb-v1.2.0-beta.10"];
+    expect(latestOrbTag(tags)?.tag).toBe("orb-v1.2.0");
+    // The lexicographic ordering this guards against would have returned the beta instead.
+    expect([...tags].sort((left, right) => right.localeCompare(left, undefined, { numeric: true }))[0]).toBe(
+      "orb-v1.2.0-beta.10",
+    );
+    // A later stable still wins over an earlier version's betas.
+    expect(latestOrbTag([...tags, "orb-v1.3.0"])?.tag).toBe("orb-v1.3.0");
+    // With no stable promotion yet, the highest beta is still the right answer (numeric, not string, order).
+    expect(latestOrbTag(["orb-v1.2.0-beta.1", "orb-v1.2.0-beta.10"])?.tag).toBe("orb-v1.2.0-beta.10");
+  });
 });
 
 describe("buildOrbReleaseReport", () => {
