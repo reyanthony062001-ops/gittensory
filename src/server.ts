@@ -309,6 +309,46 @@ async function main(): Promise<void> {
   loadFileSecrets();
   /* v8 ignore next -- importing this entrypoint starts the Node server; pure validation is covered in selfhost-preflight tests. */
   assertSelfHostPreflight(process.env);
+  // Error tracking (#1468): opt-in via SENTRY_DSN — a complete no-op when unset. When on, capture uncaught crashes
+  // + unhandled rejections (flush before exit for the fatal case); per-subsystem captures (queue dead-letter,
+  // review failures) are wired at their sites.
+  //
+  // #6325 follow-up: initialized HERE, before every boot-time advisory below (emptyConfigDirAdvisory /
+  // sqliteBackupAdvisory / publicOriginReachabilityAdvisory all "warn LOUDLY" via console.error, which
+  // installStructuredLogForwarding — wired below — is what actually forwards it to Sentry: only console.error
+  // and level:error/fatal console.log lines are ever forwarded, never console.warn). Originally this ran
+  // AFTER emptyConfigDirAdvisory's own check, so that ONE advisory's console.error was still silently
+  // unreachable by Sentry even after #6325's console.warn->console.error fix landed for the other two: the
+  // forwarding hook simply didn't exist yet at that point in the boot sequence. Kept immediately after
+  // loadFileSecrets()/assertSelfHostPreflight() specifically — a self-host SENTRY_DSN is commonly supplied via
+  // a mounted secret file loadFileSecrets() reads into process.env, and preflight is a fatal-exit gate that
+  // should run before anything else regardless of Sentry's own state.
+  /* v8 ignore start -- importing this entrypoint starts the Node server; Sentry/OTEL init behavior is covered in selfhost tests. */
+  const sentryEnabled = await initSentry(process.env);
+  if (sentryEnabled) {
+    console.log(
+      JSON.stringify({
+        event: "selfhost_sentry",
+        environment: process.env.SENTRY_ENVIRONMENT ?? "production",
+      }),
+    );
+    process.on("uncaughtException", (error) => {
+      captureError(error, { kind: "uncaughtException" }, "uncaughtException");
+      console.error(error);
+      void flushSentry().finally(() => process.exit(1));
+    });
+    process.on("unhandledRejection", (reason) => {
+      captureError(reason, { kind: "unhandledRejection" }, "unhandledRejection");
+      console.error(reason);
+    });
+    // Central error forwarding (#1468): operational failures are structured JSON logs emitted through stdout and
+    // stderr. Wrap both sinks so every level:"error"/"fatal" line surfaces as a Sentry issue WITHOUT per-site wiring.
+    installStructuredLogForwarding();
+  }
+  if (await initOpenTelemetry(process.env, sentryEnabled ? await buildSentryOpenTelemetryBridge() : undefined))
+    console.log(JSON.stringify({ event: "selfhost_otel", traces: openTelemetryTraceExportEnabled(process.env) ? "otlp" : "sentry" }));
+  /* v8 ignore stop */
+  const startedAt = Date.now();
   // This entrypoint IS the self-host runtime by definition (the cloud worker never imports server.ts), so the
   // /metrics endpoint it serves is the operator's own private scrape target, not a publicly reachable one --
   // stop redacting the `repo` label PRIVATE_REPO_LABEL_METRICS otherwise drops for every deployment
@@ -349,43 +389,18 @@ async function main(): Promise<void> {
   // Config-drift advisory: warn LOUDLY (not just the log line above) when the mount resolves but is empty --
   // see emptyConfigDirAdvisory's own doc comment for the incident this guards against.
   const configDirAdvisory = emptyConfigDirAdvisory(configDirOpts);
+  // #6325 follow-up: console.error, not console.warn -- installStructuredLogForwarding (initSentry, now above
+  // this check) only intercepts console.log (level:error/fatal only) and console.error (always forwarded);
+  // console.warn is never wrapped at all. `level: "warn"` in the payload still maps this to Sentry's own
+  // "warning" severity (see forwardStructuredLogToSentry), not an "error".
   if (configDirAdvisory)
-    console.warn(
+    console.error(
       JSON.stringify({
         level: "warn",
         event: "selfhost_config_dir_empty_advisory",
         message: configDirAdvisory,
       }),
     );
-  // Error tracking (#1468): opt-in via SENTRY_DSN — a complete no-op when unset. When on, capture uncaught crashes
-  // + unhandled rejections (flush before exit for the fatal case); per-subsystem captures (queue dead-letter,
-  // review failures) are wired at their sites.
-  /* v8 ignore start -- importing this entrypoint starts the Node server; Sentry/OTEL init behavior is covered in selfhost tests. */
-  const sentryEnabled = await initSentry(process.env);
-  if (sentryEnabled) {
-    console.log(
-      JSON.stringify({
-        event: "selfhost_sentry",
-        environment: process.env.SENTRY_ENVIRONMENT ?? "production",
-      }),
-    );
-    process.on("uncaughtException", (error) => {
-      captureError(error, { kind: "uncaughtException" }, "uncaughtException");
-      console.error(error);
-      void flushSentry().finally(() => process.exit(1));
-    });
-    process.on("unhandledRejection", (reason) => {
-      captureError(reason, { kind: "unhandledRejection" }, "unhandledRejection");
-      console.error(reason);
-    });
-    // Central error forwarding (#1468): operational failures are structured JSON logs emitted through stdout and
-    // stderr. Wrap both sinks so every level:"error"/"fatal" line surfaces as a Sentry issue WITHOUT per-site wiring.
-    installStructuredLogForwarding();
-  }
-  if (await initOpenTelemetry(process.env, sentryEnabled ? await buildSentryOpenTelemetryBridge() : undefined))
-    console.log(JSON.stringify({ event: "selfhost_otel", traces: openTelemetryTraceExportEnabled(process.env) ? "otlp" : "sentry" }));
-  /* v8 ignore stop */
-  const startedAt = Date.now();
 
   // The queue consumer captures `env`, assigned further below once the backend/migrations/AI providers are
   // ready. That used to rest on "the first job only runs once an HTTP/cron event arrives, by which point env
