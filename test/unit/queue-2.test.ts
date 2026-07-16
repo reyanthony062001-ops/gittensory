@@ -3318,7 +3318,7 @@ describe("queue processors", () => {
   });
 
   it("marks installation health from queued installation metadata", async () => {
-    const env = createTestEnv({ GITHUB_APP_PRIVATE_KEY: await generatePrivateKeyPem() });
+    const env = createTestEnv({ GITHUB_APP_PRIVATE_KEY: await generatePrivateKeyPem(), LOOPOVER_DRIFT_ISSUE_REPO: "unrelated-org/unrelated-repo" });
     await persistRegistrySnapshot(
       env,
       normalizeRegistryPayload(
@@ -4417,7 +4417,7 @@ describe("queue processors", () => {
   });
 
   it("stamps a gate-only surface even when local Gate check-summary persistence fails", async () => {
-    const env = createTestEnv({ GITHUB_APP_PRIVATE_KEY: await generatePrivateKeyPem() });
+    const env = createTestEnv({ GITHUB_APP_PRIVATE_KEY: await generatePrivateKeyPem(), LOOPOVER_DRIFT_ISSUE_REPO: "unrelated-org/unrelated-repo" });
     await persistRegistrySnapshot(
       env,
       normalizeRegistryPayload(
@@ -4473,7 +4473,7 @@ describe("queue processors", () => {
   });
 
   it("finalizes a permission-missing gate check through the neutral fallback before stamping the surface", async () => {
-    const env = createTestEnv({ GITHUB_APP_PRIVATE_KEY: await generatePrivateKeyPem() });
+    const env = createTestEnv({ GITHUB_APP_PRIVATE_KEY: await generatePrivateKeyPem(), LOOPOVER_DRIFT_ISSUE_REPO: "unrelated-org/unrelated-repo" });
     await persistRegistrySnapshot(
       env,
       normalizeRegistryPayload(
@@ -4537,7 +4537,7 @@ describe("queue processors", () => {
   });
 
   it("does not stamp a permission-missing gate check when the neutral fallback cannot publish", async () => {
-    const env = createTestEnv({ GITHUB_APP_PRIVATE_KEY: await generatePrivateKeyPem() });
+    const env = createTestEnv({ GITHUB_APP_PRIVATE_KEY: await generatePrivateKeyPem(), LOOPOVER_DRIFT_ISSUE_REPO: "unrelated-org/unrelated-repo" });
     await persistRegistrySnapshot(
       env,
       normalizeRegistryPayload(
@@ -4600,7 +4600,7 @@ describe("queue processors", () => {
   });
 
   it("suppresses public review output when the live PR head changed before publish", async () => {
-    const env = createTestEnv({ GITHUB_APP_PRIVATE_KEY: await generatePrivateKeyPem() });
+    const env = createTestEnv({ GITHUB_APP_PRIVATE_KEY: await generatePrivateKeyPem(), LOOPOVER_DRIFT_ISSUE_REPO: "unrelated-org/unrelated-repo" });
     await persistRegistrySnapshot(
       env,
       normalizeRegistryPayload(
@@ -4730,7 +4730,7 @@ describe("queue processors", () => {
     ] as const;
 
     for (const scenario of cases) {
-      const env = createTestEnv({ GITHUB_APP_PRIVATE_KEY: await generatePrivateKeyPem() });
+      const env = createTestEnv({ GITHUB_APP_PRIVATE_KEY: await generatePrivateKeyPem(), LOOPOVER_DRIFT_ISSUE_REPO: "unrelated-org/unrelated-repo" });
       await persistRegistrySnapshot(
         env,
         normalizeRegistryPayload(
@@ -4870,7 +4870,7 @@ describe("queue processors", () => {
       }
       await originalRecordAuditEvent(auditEnv, event);
     });
-    const env = createTestEnv({ GITHUB_APP_PRIVATE_KEY: await generatePrivateKeyPem() });
+    const env = createTestEnv({ GITHUB_APP_PRIVATE_KEY: await generatePrivateKeyPem(), LOOPOVER_DRIFT_ISSUE_REPO: "unrelated-org/unrelated-repo" });
     await persistRegistrySnapshot(
       env,
       normalizeRegistryPayload(
@@ -4936,7 +4936,7 @@ describe("queue processors", () => {
   });
 
   it("finalizes the pending gate as skipped when the PR head changes after review work", async () => {
-    const env = createTestEnv({ GITHUB_APP_PRIVATE_KEY: await generatePrivateKeyPem() });
+    const env = createTestEnv({ GITHUB_APP_PRIVATE_KEY: await generatePrivateKeyPem(), LOOPOVER_DRIFT_ISSUE_REPO: "unrelated-org/unrelated-repo" });
     await persistRegistrySnapshot(
       env,
       normalizeRegistryPayload(
