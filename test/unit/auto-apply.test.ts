@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   type AutoApplyContext,
   applyOverrideRecommendation,
+  authoritativeGateOverride,
   deleteLiveOverride,
   deleteShadowOverride,
   describeOverride,
@@ -16,6 +17,7 @@ import {
   runAutoApplyRecommendations,
   sanitizeOverridePayload,
   SHADOW_PROMOTION_MIN_DECIDED,
+  toLiveGateThresholdFields,
   type StorageEnv,
   type StorageLike,
   type TunableOverride,
@@ -783,5 +785,54 @@ describe("runAutoApplyRecommendations — remaining branches", () => {
     ];
     await runAutoApplyRecommendations(env, ctx({ recs }));
     expect(tables.shadow.get("g")?.confidence_floor).toBe(0.97);
+  });
+});
+
+// #6486 / #6209 — the AMS live-gate-threshold probe's two pure helpers. The payload type IS the privacy
+// boundary here, so every arm is pinned: a partially-populated override must resolve its missing tunables to
+// null rather than throwing or omitting them, and no audit/lifecycle field may ever appear.
+describe("authoritativeGateOverride (#6486 — live wins, shadow fills in)", () => {
+  const live: TunableOverride = { confidenceFloor: 0.9 };
+  const shadow = { override: { confidenceFloor: 0.4 } as TunableOverride, validatedUntil: null };
+
+  it("prefers the live override even while a shadow is soaking", () => {
+    expect(authoritativeGateOverride(live, shadow)).toBe(live);
+  });
+
+  it("falls through to a soaking shadow only when no live row is active", () => {
+    expect(authoritativeGateOverride(null, shadow)).toBe(shadow.override);
+  });
+
+  it("is null when neither is active", () => {
+    expect(authoritativeGateOverride(null, null)).toBeNull();
+  });
+});
+
+describe("toLiveGateThresholdFields (#6486 — the exact snake_case allowlist)", () => {
+  it("returns null when no override is active", () => {
+    expect(toLiveGateThresholdFields(null)).toBeNull();
+  });
+
+  it("projects a fully-populated override into exactly the three allowlisted fields", () => {
+    const fields = toLiveGateThresholdFields({ confidenceFloor: 0.9, scopeCap: { files: 12, lines: 400 } });
+    expect(fields).toEqual({ confidence_floor: 0.9, scope_cap_files: 12, scope_cap_lines: 400 });
+    // The allowlist is the point: no applied_at/clear_at/audit ever rides along.
+    expect(Object.keys(fields ?? {}).sort()).toEqual(["confidence_floor", "scope_cap_files", "scope_cap_lines"]);
+  });
+
+  it("resolves an absent scope cap to nulls rather than throwing (floor-only override)", () => {
+    expect(toLiveGateThresholdFields({ confidenceFloor: 0.5 })).toEqual({
+      confidence_floor: 0.5,
+      scope_cap_files: null,
+      scope_cap_lines: null,
+    });
+  });
+
+  it("resolves an absent confidence floor to null (caps-only override)", () => {
+    expect(toLiveGateThresholdFields({ scopeCap: { files: 3, lines: 90 } })).toEqual({
+      confidence_floor: null,
+      scope_cap_files: 3,
+      scope_cap_lines: 90,
+    });
   });
 });

@@ -264,7 +264,7 @@ import { buildMaintainerActivationPreview, recommendedAdvisoryActivationSettings
 import { buildRepoOutcomeCalibration } from "../services/outcome-calibration";
 import { loadGatePrecisionReport } from "../services/gate-precision";
 import { computeOpsStats, isOpsEnabled, resolveOpsManifestOverride } from "../review/ops-wire";
-import { deleteLiveOverride, listOverrideAudit, loadOverride, loadShadowOverride, sanitizeOverridePayload, type StorageEnv } from "../review/auto-apply";
+import { authoritativeGateOverride, deleteLiveOverride, listOverrideAudit, loadOverride, loadShadowOverride, sanitizeOverridePayload, toLiveGateThresholdFields, type StorageEnv } from "../review/auto-apply";
 import { handleInternalCalibration, handleInternalDecision, type OpsAgentConfig } from "../review/ops";
 import { computeParityReadiness, isParityAuditEnabled } from "../review/parity-wire";
 import { computePredictedGateAgreement } from "../review/predicted-gate-agreement";
@@ -3016,6 +3016,29 @@ export function createApp() {
       },
       shadowPending: shadow !== null,
     });
+  });
+
+  // AMS's probe surface for a repo's live self-tuned gate thresholds (#6486 / #6209). Deliberately narrower
+  // than gate-config/effective above: it returns ONLY the three snake_case fields #6209 allowlisted — the
+  // names AMS reconstructs today from static config — and never applied_at/clear_at or the override_audit
+  // trail. The live row wins; a soaking shadow fills in only when no live row is active. 404 when neither is
+  // active, matching the issue-quality/outcome-patterns not-found convention rather than inventing one. Auth
+  // mirrors gate-config/effective exactly.
+  app.get("/v1/repos/:owner/:repo/live-gate-thresholds", async (c) => {
+    const unauthorized = await requireStaticProtectedApiToken(c);
+    if (unauthorized) return unauthorized;
+    const fullName = `${c.req.param("owner")}/${c.req.param("repo")}`;
+    const identity = await authenticateRequestIdentity(c);
+    /* v8 ignore next -- requireStaticProtectedApiToken above already rejected null and session identities, so only static tokens reach here. */
+    if (!identity || identity.kind !== "static") return c.json({ error: "unauthorized" }, 401);
+    // Only the shared, end-user-obtainable static `mcp` token is allowlist-scoped; operator-only api/internal
+    // tokens stay trusted — same repo-scoped read precedent gate-config/effective uses.
+    if (identity.actor === "mcp" && !(await import("../auth/security")).isMcpReadRepoAllowed(c.env.MCP_READ_REPO_ALLOWLIST, fullName)) return c.json({ error: "forbidden_repo" }, 403);
+    const storageEnv = c.env as unknown as StorageEnv;
+    const [live, shadow] = await Promise.all([loadOverride(storageEnv, fullName), loadShadowOverride(storageEnv, fullName)]);
+    const fields = toLiveGateThresholdFields(authoritativeGateOverride(live, shadow));
+    if (!fields) return c.json({ error: "live_gate_thresholds_not_found", repoFullName: fullName }, 404);
+    return c.json({ repoFullName: fullName, ...fields });
   });
 
   app.get("/v1/repos/:owner/:repo/outcome-patterns", async (c) => {

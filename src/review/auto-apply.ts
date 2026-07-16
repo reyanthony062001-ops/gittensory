@@ -271,6 +271,43 @@ export async function loadShadowOverride(env: StorageEnv, project: string): Prom
   return override ? { override, validatedUntil: row.validated_until } : null;
 }
 
+/**
+ * The exact field-limited payload an AMS/MCP caller may read for a repo's live self-tuned gate thresholds
+ * (#6486 / #6209). snake_case mirrors the `tunables_overrides` column names AMS probes for. #6209 allowlisted
+ * these three fields and nothing else: `applied_at`/`clear_at` and the whole `override_audit` trail are
+ * deliberately absent, so this type IS the privacy boundary — widening it is a deliberate decision, not a
+ * refactor.
+ */
+export type LiveGateThresholdFields = {
+  confidence_floor: number | null;
+  scope_cap_files: number | null;
+  scope_cap_lines: number | null;
+};
+
+/**
+ * Which override a reader should be shown: the live row wins, and a soaking shadow fills in only when no live
+ * row is active — #6209's "whichever of the live/shadow row is authoritative". Mirrors the precedence
+ * `runAutoApplyRecommendations` already applies, rather than inventing a second one.
+ */
+export function authoritativeGateOverride(live: TunableOverride | null, shadow: ShadowOverride | null): TunableOverride | null {
+  return live ?? shadow?.override ?? null;
+}
+
+/**
+ * Project an authoritative override into the allowlisted snake_case fields, or null when no override is
+ * active. An unset tunable reads as null rather than being omitted, so the payload's shape is stable for a
+ * probing client. Uses the same optional-chaining idiom as the `gate-config/effective` route, so a partially
+ * populated override (floor but no caps, or vice versa) can never throw here.
+ */
+export function toLiveGateThresholdFields(override: TunableOverride | null): LiveGateThresholdFields | null {
+  if (!override) return null;
+  return {
+    confidence_floor: override.confidenceFloor ?? null,
+    scope_cap_files: override.scopeCap?.files ?? null,
+    scope_cap_lines: override.scopeCap?.lines ?? null,
+  };
+}
+
 /** Delete a project's shadow override (after promotion, or on clear). */
 export async function deleteShadowOverride(env: StorageEnv, project: string): Promise<void> {
   await storage(env).prepare("DELETE FROM tunables_overrides_shadow WHERE project = ?").bind(project).run();

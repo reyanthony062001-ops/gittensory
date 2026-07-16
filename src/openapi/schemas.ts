@@ -1739,6 +1739,18 @@ export const IssueQualityResponseSchema = z
   })
   .openapi("IssueQualityResponse");
 
+/** The exact three-field allowlist #6209 decided for AMS's live-gate-threshold probe (#6486). Nullable rather
+ *  than optional so the payload shape is stable for a probing client; audit/applied_at/clear_at are absent by
+ *  design, not by omission. */
+export const LiveGateThresholdsResponseSchema = z
+  .object({
+    repoFullName: z.string(),
+    confidence_floor: z.number().nullable(),
+    scope_cap_files: z.number().nullable(),
+    scope_cap_lines: z.number().nullable(),
+  })
+  .openapi("LiveGateThresholdsResponse");
+
 export const BurdenForecastSchema = z
   .object({
     repoFullName: z.string(),

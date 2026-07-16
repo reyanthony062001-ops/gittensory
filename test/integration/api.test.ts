@@ -6731,6 +6731,87 @@ describe("api routes", () => {
     expect(JSON.stringify(malformedPayload.policy.publicSafe)).not.toMatch(FORBIDDEN_PUBLIC_REPORT_TERMS);
   });
 
+  it("serves AMS the field-limited live gate thresholds, gated by the mcp allowlist (#6486)", async () => {
+    const app = createApp();
+
+    // No live row and no shadow → 404 with the sibling routes' not-found shape, not an all-null 200.
+    const emptyEnv = createTestEnv();
+    const empty = await app.request("/v1/repos/entrius/allways-ui/live-gate-thresholds", { headers: apiHeaders(emptyEnv) }, emptyEnv);
+    expect(empty.status).toBe(404);
+    await expect(empty.json()).resolves.toEqual({ error: "live_gate_thresholds_not_found", repoFullName: "entrius/allways-ui" });
+
+    // A live override wins over a soaking shadow, and the audit trail never surfaces.
+    const env = createTestEnv();
+    const storageEnv = env as unknown as StorageEnv;
+    await writeLiveOverride(storageEnv, "entrius/allways-ui", { confidenceFloor: 0.9, scopeCap: { files: 12, lines: 400 } });
+    await writeShadowOverride(storageEnv, "entrius/allways-ui", { confidenceFloor: 0.4 }, "2099-01-01T00:00:00.000Z");
+    await recordOverrideAudit(storageEnv, "entrius/allways-ui", "apply", { note: "audit-detail-must-never-surface" });
+    const live = await app.request("/v1/repos/entrius/allways-ui/live-gate-thresholds", { headers: apiHeaders(env) }, env);
+    expect(live.status).toBe(200);
+    const body = (await live.json()) as unknown;
+    // The exact allowlist #6209 decided — the live row's values, never the shadow's queued 0.4.
+    expect(body).toEqual({
+      repoFullName: "entrius/allways-ui",
+      confidence_floor: 0.9,
+      scope_cap_files: 12,
+      scope_cap_lines: 400,
+    });
+    // The whole point of the field limit: no lifecycle or audit material may ride along.
+    expect(JSON.stringify(body)).not.toMatch(/override_audit|event_type|applied_at|clear_at|shadow|audit-detail-must-never-surface|"detail"/i);
+
+    // A static mcp credential inside the allowlist reads successfully — the ALLOWED side of the gate
+    // (createTestEnv defaults MCP_READ_REPO_ALLOWLIST to "*"), so isMcpReadRepoAllowed returns true.
+    const mcpAllowed = await app.request("/v1/repos/entrius/allways-ui/live-gate-thresholds", { headers: mcpHeaders(env) }, env);
+    expect(mcpAllowed.status).toBe(200);
+    await expect(mcpAllowed.json()).resolves.toMatchObject({ confidence_floor: 0.9 });
+
+    // ...and the DENIED side: an mcp token whose allowlist excludes this repo gets the sibling routes' 403.
+    const deniedEnv = createTestEnv({ MCP_READ_REPO_ALLOWLIST: "someone/else" });
+    await writeLiveOverride(deniedEnv as unknown as StorageEnv, "entrius/allways-ui", { confidenceFloor: 0.9 });
+    const denied = await app.request("/v1/repos/entrius/allways-ui/live-gate-thresholds", { headers: mcpHeaders(deniedEnv) }, deniedEnv);
+    expect(denied.status).toBe(403);
+    await expect(denied.json()).resolves.toEqual({ error: "forbidden_repo" });
+
+    // With no live row, a soaking shadow fills in — the only case where the shadow's values are readable.
+    const shadowEnv = createTestEnv();
+    await writeShadowOverride(shadowEnv as unknown as StorageEnv, "entrius/allways-ui", { confidenceFloor: 0.8, scopeCap: { files: 5, lines: 120 } }, "2099-01-01T00:00:00.000Z");
+    const shadowOnly = await app.request("/v1/repos/entrius/allways-ui/live-gate-thresholds", { headers: apiHeaders(shadowEnv) }, shadowEnv);
+    expect(shadowOnly.status).toBe(200);
+    await expect(shadowOnly.json()).resolves.toEqual({
+      repoFullName: "entrius/allways-ui",
+      confidence_floor: 0.8,
+      scope_cap_files: 5,
+      scope_cap_lines: 120,
+    });
+
+    // A floor-only override still answers with both cap fields present and null — a probing client's payload
+    // shape never changes, so it needs no defensive key checks.
+    const floorOnlyEnv = createTestEnv();
+    await writeLiveOverride(floorOnlyEnv as unknown as StorageEnv, "entrius/allways-ui", { confidenceFloor: 0.5 });
+    const floorOnly = await app.request("/v1/repos/entrius/allways-ui/live-gate-thresholds", { headers: apiHeaders(floorOnlyEnv) }, floorOnlyEnv);
+    expect(floorOnly.status).toBe(200);
+    await expect(floorOnly.json()).resolves.toEqual({
+      repoFullName: "entrius/allways-ui",
+      confidence_floor: 0.5,
+      scope_cap_files: null,
+      scope_cap_lines: null,
+    });
+
+    // This is a machine-to-machine surface. Even an ADMIN's browser session — which bypasses the session path
+    // allowlist and so actually reaches this handler — is turned away: reading it requires a static token,
+    // never a session cookie. Mirrors the maintainer-packet/reviewability precedent in routes-errors.test.ts.
+    const adminEnv = createTestEnv({ ADMIN_GITHUB_LOGINS: "admin-user" });
+    await writeLiveOverride(adminEnv as unknown as StorageEnv, "entrius/allways-ui", { confidenceFloor: 0.9 });
+    const { token: adminSession } = await createSessionForGitHubUser(adminEnv, { login: "admin-user", id: 6486 });
+    const sessionDenied = await app.request(
+      "/v1/repos/entrius/allways-ui/live-gate-thresholds",
+      { headers: { authorization: `Bearer ${adminSession}` } },
+      adminEnv,
+    );
+    expect(sessionDenied.status).toBe(403);
+    await expect(sessionDenied.json()).resolves.toEqual({ error: "static_token_required" });
+  });
+
   it("exposes only a repo's effective self-tuned gate thresholds, never the raw override audit trail (#6247)", async () => {
     const app = createApp();
     const env = createTestEnv();
