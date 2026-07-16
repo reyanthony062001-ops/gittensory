@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { fetchRunStates, RUN_STATE_API_PATH, type RunHistoryResult, type RunStateRow } from "./lib/run-history";
@@ -9,7 +9,15 @@ const fixtureRows: RunStateRow[] = [
   { repoFullName: "acme/gadgets", state: "idle", updatedAt: "2026-07-10T05:00:00.000Z" },
 ];
 
-describe("RunHistoryView (#4305)", () => {
+function manyRows(count: number): RunStateRow[] {
+  return Array.from({ length: count }, (_, index) => ({
+    repoFullName: `acme/repo-${index}`,
+    state: "idle" as const,
+    updatedAt: "2026-07-10T05:00:00.000Z",
+  }));
+}
+
+describe("RunHistoryView (#4305, redesigned #6510)", () => {
   it("renders one table row per run-state fixture row with repo, state badge, and last-updated", () => {
     render(<RunHistoryView result={{ ok: true, rows: fixtureRows }} />);
     expect(screen.getByRole("columnheader", { name: "Repository" })).toBeTruthy();
@@ -20,20 +28,44 @@ describe("RunHistoryView (#4305)", () => {
     expect(screen.getAllByRole("row")).toHaveLength(3); // header + 2 fixture rows
   });
 
-  it("renders the fresh-install empty state without erroring", () => {
+  it("renders a content-shaped loading skeleton (role=status), not the old flat loading text (#6510)", () => {
+    render(<RunHistoryView result={null} />);
+    expect(screen.getByRole("status", { name: /loading local run state/i })).toBeTruthy();
+    expect(screen.queryByText("Loading local run state…")).toBeNull(); // the pre-#6510 sentence is gone
+  });
+
+  it("renders the shared StateBoundary error surface on an unreachable API (#6510)", () => {
+    render(<RunHistoryView result={{ ok: false, error: "connection refused" }} />);
+    expect(screen.getByRole("alert")).toBeTruthy();
+    expect(screen.getByText(/Couldn't read local run state/i)).toBeTruthy();
+  });
+
+  it("renders the empty state via StateBoundary when there are no tracked repos (#6510)", () => {
     render(<RunHistoryView result={{ ok: true, rows: [] }} />);
     expect(screen.getByText(/No local run state yet/i)).toBeTruthy();
     expect(screen.queryByRole("table")).toBeNull();
   });
 
-  it("renders an error message when the local API is unreachable", () => {
-    render(<RunHistoryView result={{ ok: false, error: "connection refused" }} />);
-    expect(screen.getByRole("alert").textContent).toContain("connection refused");
+  it("does not paginate at or below 20 rows — full table, no controls (#6510)", () => {
+    render(<RunHistoryView result={{ ok: true, rows: manyRows(20) }} />);
+    expect(screen.queryByRole("navigation", { name: /pagination/i })).toBeNull();
+    expect(screen.getAllByRole("row")).toHaveLength(21); // header + all 20 rows shown
   });
 
-  it("renders the loading state before the first result arrives", () => {
-    render(<RunHistoryView result={null} />);
-    expect(screen.getByText(/Loading local run state/i)).toBeTruthy();
+  it("paginates client-side above 20 rows, paging without any refetch (#6510)", () => {
+    render(<RunHistoryView result={{ ok: true, rows: manyRows(45) }} />);
+    expect(screen.getByRole("navigation", { name: /pagination/i })).toBeTruthy();
+    // page 1: first 20 rows only
+    expect(screen.getAllByRole("row")).toHaveLength(21);
+    expect(screen.getByText("acme/repo-0")).toBeTruthy();
+    expect(screen.queryByText("acme/repo-20")).toBeNull();
+    // page 2
+    fireEvent.click(screen.getByRole("link", { name: "2" }));
+    expect(screen.getByText("acme/repo-20")).toBeTruthy();
+    expect(screen.queryByText("acme/repo-0")).toBeNull();
+    // page 3 holds the remaining 5 rows (header + 5)
+    fireEvent.click(screen.getByRole("link", { name: "3" }));
+    expect(screen.getAllByRole("row")).toHaveLength(6);
   });
 });
 
