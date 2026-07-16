@@ -1,15 +1,7 @@
-import type { PlanDag, PlanStep, PlanStepStatus } from "./plan-export.js";
+import type { PlanDag } from "./plan-export.js";
+import { nextReadySteps } from "./plan-step-readiness.js";
 
 export type PlanOverallStatus = "pending" | "running" | "completed" | "failed" | "blocked";
-
-const isDone = (status: PlanStepStatus): boolean => status === "completed" || status === "skipped";
-
-function nextReadySteps(plan: PlanDag): PlanStep[] {
-  const statusById = new Map(plan.steps.map((step) => [step.id, step.status]));
-  return plan.steps.filter(
-    (step) => step.status === "pending" && step.dependsOn.every((dep) => isDone(statusById.get(dep) ?? "pending")),
-  );
-}
 
 /**
  * Resolve the coarse plan status matching hosted `planProgress`'s `status` field. Pure — reads the plan DAG only.
