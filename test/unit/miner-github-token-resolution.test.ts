@@ -6,6 +6,7 @@ import {
   hasGitHubTokenSource,
   resetGitHubTokenResolutionForTesting,
   resolveGitHubToken,
+  resolveLoopoverBackendSession,
 } from "../../packages/loopover-miner/lib/github-token-resolution.js";
 
 function writeConfig(dir: string, config: unknown) {
@@ -271,6 +272,28 @@ describe("resolveGitHubToken (#6116)", () => {
     };
     await resolveGitHubToken(configuredEnv(dir, { LOOPOVER_PROFILE: "Not A Valid Name!!" }), { fetchImpl });
     expect(capturedAuth).toBe("Bearer default-session");
+  });
+});
+
+describe("resolveLoopoverBackendSession (#6487)", () => {
+  let dir: string;
+
+  afterEach(() => {
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("returns null when no loopover-mcp session token is on disk", () => {
+    dir = mkdtempSync(join(tmpdir(), "loopover-miner-backend-session-none-"));
+    expect(resolveLoopoverBackendSession(configuredEnv(dir))).toBeNull();
+  });
+
+  it("returns apiUrl + sessionToken from the active loopover-mcp profile", () => {
+    dir = mkdtempSync(join(tmpdir(), "loopover-miner-backend-session-ok-"));
+    writeConfig(dir, { profiles: { default: { apiUrl: "https://api.example", session: { token: "session-token" } } } });
+    expect(resolveLoopoverBackendSession(configuredEnv(dir))).toEqual({
+      apiUrl: "https://api.example",
+      sessionToken: "session-token",
+    });
   });
 });
 
