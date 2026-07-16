@@ -889,6 +889,11 @@ const STDIO_TOOL_DESCRIPTORS = [
     description: "Explain a private score preview multiplier-by-multiplier with plain-English levers and the highest-impact improvement.",
   },
   {
+    name: "loopover_get_eligibility_plan",
+    category: "discovery",
+    description: "Return a private eligibility plan for a local branch: whether it is eligible now, the public-safe blockers holding it back, and the cleanup paths to clear them.",
+  },
+  {
     name: "loopover_get_decision_pack",
     category: "discovery",
     description: "Return the private decision pack for a contributor: the ranked repos and issues to work on next, with per-repo go/raise/avoid guidance. Takes login (the contributor's GitHub username).",
@@ -1509,6 +1514,53 @@ registerStdioTool(
   async (input) => toolResult("LoopOver private local PR scoring preview.", await previewLocalScore(await withClientWorkspaceRoots(input))),
 );
 
+/**
+ * Build the /v1/scoring/* request body from local branch metadata. Shared verbatim by
+ * loopover_explain_score_breakdown and loopover_get_eligibility_plan (#6621): both POST the SAME body to
+ * sibling routes that differ only in the derivation applied on top of the score preview, so this is factored
+ * out rather than copied — a second copy would drift the moment either route's contract moves.
+ * Never uploads source contents: only diff metadata and caller-supplied scenario knobs.
+ */
+async function buildLocalScoreRequestBody(input, purpose) {
+  const workspaceInput = await withClientWorkspaceRoots(input);
+  const contributorLogin = workspaceInput.contributorLogin ?? activeProfile.session?.login;
+  if (!contributorLogin) throw new Error(`contributorLogin is required for ${purpose}.`);
+  const workspace = resolveWorkspaceCwd(workspaceInput);
+  const diff = collectLocalDiff(workspace.cwd, workspaceInput.baseRef, workspaceInput.workspaceRoots);
+  const branchPayload = buildBranchAnalysisPayload({
+    ...workspaceInput,
+    login: contributorLogin,
+    cwd: workspace.cwd,
+    repoFullName: workspaceInput.repoFullName,
+    baseRef: workspaceInput.baseRef,
+  });
+  const upstreamPreview = branchPayload.localScorerStatus;
+  const estimatedSourceLines = workspaceInput.sourceLines ?? Math.max(1, diff.changedLineCount - diff.testFiles.length);
+  return {
+    repoFullName: workspaceInput.repoFullName,
+    targetType: "local_diff",
+    targetKey: workspaceInput.targetKey ?? localDiffTargetKey(branchPayload, workspaceInput.baseRef),
+    contributorLogin,
+    labels: workspaceInput.labels,
+    linkedIssueMode: workspaceInput.linkedIssueMode,
+    sourceTokenScore: workspaceInput.sourceTokenScore ?? estimatedSourceLines,
+    sourceLines: estimatedSourceLines,
+    totalTokenScore: workspaceInput.totalTokenScore ?? diff.changedLineCount,
+    testTokenScore: diff.testFiles.length,
+    openPrCount: workspaceInput.openPrCount,
+    credibility: workspaceInput.credibility,
+    changesRequestedCount: workspaceInput.changesRequestedCount,
+    pendingMergedPrCount: workspaceInput.pendingMergedPrCount,
+    pendingClosedPrCount: workspaceInput.pendingClosedPrCount,
+    approvedPrCount: workspaceInput.approvedPrCount,
+    expectedOpenPrCountAfterMerge: workspaceInput.expectedOpenPrCountAfterMerge,
+    projectedCredibility: workspaceInput.projectedCredibility,
+    scenarioNotes: workspaceInput.scenarioNotes,
+    branchEligibility: workspaceInput.branchEligibility,
+    metadataOnly: !upstreamPreview.ok,
+  };
+}
+
 registerStdioTool(
   "loopover_explain_score_breakdown",
   {
@@ -1516,44 +1568,20 @@ registerStdioTool(
     inputSchema: localScoreShape,
   },
   async (input) => {
-    const workspaceInput = await withClientWorkspaceRoots(input);
-    const contributorLogin = workspaceInput.contributorLogin ?? activeProfile.session?.login;
-    if (!contributorLogin) throw new Error("contributorLogin is required for score breakdown.");
-    const workspace = resolveWorkspaceCwd(workspaceInput);
-    const diff = collectLocalDiff(workspace.cwd, workspaceInput.baseRef, workspaceInput.workspaceRoots);
-    const branchPayload = buildBranchAnalysisPayload({
-      ...workspaceInput,
-      login: contributorLogin,
-      cwd: workspace.cwd,
-      repoFullName: workspaceInput.repoFullName,
-      baseRef: workspaceInput.baseRef,
-    });
-    const upstreamPreview = branchPayload.localScorerStatus;
-    const estimatedSourceLines = workspaceInput.sourceLines ?? Math.max(1, diff.changedLineCount - diff.testFiles.length);
-    const body = {
-      repoFullName: workspaceInput.repoFullName,
-      targetType: "local_diff",
-      targetKey: workspaceInput.targetKey ?? localDiffTargetKey(branchPayload, workspaceInput.baseRef),
-      contributorLogin,
-      labels: workspaceInput.labels,
-      linkedIssueMode: workspaceInput.linkedIssueMode,
-      sourceTokenScore: workspaceInput.sourceTokenScore ?? estimatedSourceLines,
-      sourceLines: estimatedSourceLines,
-      totalTokenScore: workspaceInput.totalTokenScore ?? diff.changedLineCount,
-      testTokenScore: diff.testFiles.length,
-      openPrCount: workspaceInput.openPrCount,
-      credibility: workspaceInput.credibility,
-      changesRequestedCount: workspaceInput.changesRequestedCount,
-      pendingMergedPrCount: workspaceInput.pendingMergedPrCount,
-      pendingClosedPrCount: workspaceInput.pendingClosedPrCount,
-      approvedPrCount: workspaceInput.approvedPrCount,
-      expectedOpenPrCountAfterMerge: workspaceInput.expectedOpenPrCountAfterMerge,
-      projectedCredibility: workspaceInput.projectedCredibility,
-      scenarioNotes: workspaceInput.scenarioNotes,
-      branchEligibility: workspaceInput.branchEligibility,
-      metadataOnly: !upstreamPreview.ok,
-    };
+    const body = await buildLocalScoreRequestBody(input, "score breakdown");
     return toolResult("LoopOver private score breakdown.", await apiPost("/v1/scoring/explain-breakdown", body));
+  },
+);
+
+registerStdioTool(
+  "loopover_get_eligibility_plan",
+  {
+    description: stdioToolDescription("loopover_get_eligibility_plan"),
+    inputSchema: localScoreShape,
+  },
+  async (input) => {
+    const body = await buildLocalScoreRequestBody(input, "eligibility plan");
+    return toolResult("LoopOver private eligibility plan.", await apiPost("/v1/scoring/eligibility-plan", body));
   },
 );
 

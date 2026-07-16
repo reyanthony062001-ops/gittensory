@@ -1,6 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import mcpPackageJson from "../../packages/loopover-mcp/package.json";
 import { createSessionForGitHubUser, hashToken } from "../../src/auth/security";
+
+// #6621: the eligibility plan is contributor-facing, so its summary must stay inside the same public-safe
+// vocabulary the MCP tool is already held to (mirrors test/unit/mcp-eligibility-plan.test.ts).
+const FORBIDDEN_PUBLIC_LANGUAGE_ELIGIBILITY = /wallet|hotkey|coldkey|mnemonic|seed phrase|payout|raw trust|trust score|reward estimate|farming|private reviewability|scoreability|private ranking/i;
 import {
   upsertBounty,
   upsertAgentCommandAnswer,
@@ -2011,6 +2015,88 @@ describe("api routes", () => {
     );
     expect(missingContributorBreakdown.status).toBe(400);
     await expect(missingContributorBreakdown.json()).resolves.toMatchObject({ error: "contributor_login_required" });
+
+    // #6621 — the eligibility-plan REST mirror completes the preview/explain-breakdown/eligibility trio.
+    // It derives from the SAME preview as the two routes above, so the plan must agree with them.
+    const eligibilityPlan = await app.request(
+      "/v1/scoring/eligibility-plan",
+      { method: "POST", headers: apiHeaders(env), body: JSON.stringify(agedScoreInput) },
+      env,
+    );
+    expect(eligibilityPlan.status).toBe(200);
+    const eligibilityPlanBody = (await eligibilityPlan.json()) as { eligible: boolean; blockers: unknown[]; publicSummary: string };
+    expect(eligibilityPlanBody).toMatchObject({
+      eligible: expect.any(Boolean),
+      publicSummary: expect.any(String),
+      blockers: expect.any(Array),
+    });
+    // The plan is a pure derivation of the same preview, never a second, drifting score path.
+    expect(eligibilityPlanBody.publicSummary).not.toMatch(FORBIDDEN_PUBLIC_LANGUAGE_ELIGIBILITY);
+
+    // An ineligible branch surfaces its blockers rather than an error: a plan with nothing to do is still a plan.
+    const blockedPlan = await app.request(
+      "/v1/scoring/eligibility-plan",
+      {
+        method: "POST",
+        headers: apiHeaders(env),
+        body: JSON.stringify({ ...agedScoreInput, sourceTokenScore: 0, sourceLines: 0, totalTokenScore: 0, openPrCount: 99 }),
+      },
+      env,
+    );
+    expect(blockedPlan.status).toBe(200);
+    const blockedPlanBody = (await blockedPlan.json()) as { eligible: boolean; blockers: unknown[] };
+    expect(blockedPlanBody.blockers.length).toBeGreaterThan(0);
+    expect(blockedPlanBody.eligible).toBe(false);
+
+    // contributorLogin is OPTIONAL here (unlike explain-breakdown, matching /v1/scoring/preview and the MCP
+    // tool): omitting it must still return a plan, not a 400 — this is the anonymous/pre-login CLI path.
+    const anonymousPlan = await app.request(
+      "/v1/scoring/eligibility-plan",
+      {
+        method: "POST",
+        headers: apiHeaders(env),
+        body: JSON.stringify({ repoFullName: "entrius/allways-ui", sourceTokenScore: 42 }),
+      },
+      env,
+    );
+    expect(anonymousPlan.status).toBe(200);
+    await expect(anonymousPlan.json()).resolves.toMatchObject({ eligible: expect.any(Boolean), publicSummary: expect.any(String) });
+
+    // A malformed body is rejected by the shared scorePreviewSchema, same shape as its siblings.
+    const invalidPlan = await app.request(
+      "/v1/scoring/eligibility-plan",
+      { method: "POST", headers: apiHeaders(env), body: JSON.stringify({ nope: true }) },
+      env,
+    );
+    expect(invalidPlan.status).toBe(400);
+    await expect(invalidPlan.json()).resolves.toMatchObject({ error: "invalid_scoring_preview_request" });
+
+    // ...and a body that isn't JSON at all degrades to the same 400 rather than throwing out of the handler.
+    const unparseablePlan = await app.request(
+      "/v1/scoring/eligibility-plan",
+      { method: "POST", headers: apiHeaders(env), body: "not-json-at-all" },
+      env,
+    );
+    expect(unparseablePlan.status).toBe(400);
+    await expect(unparseablePlan.json()).resolves.toMatchObject({ error: "invalid_scoring_preview_request" });
+
+    // When contributorLogin IS supplied it is authorization-gated: a session may only ask about itself, so one
+    // contributor cannot read another's eligibility plan (the reason the gate is conditional, not absent).
+    // The session must be an ADMIN one to reach the handler at all — canSessionAccessPath's allowlist turns an
+    // ordinary session away with insufficient_role first, so this is what actually exercises the gate.
+    const planAdminEnv = createTestEnv({ ADMIN_GITHUB_LOGINS: "plan-admin" });
+    const { token: planSessionToken } = await createSessionForGitHubUser(planAdminEnv, { login: "plan-admin", id: 6621 });
+    const foreignPlan = await app.request(
+      "/v1/scoring/eligibility-plan",
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${planSessionToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ ...agedScoreInput, contributorLogin: "someone-else" }),
+      },
+      planAdminEnv,
+    );
+    expect(foreignPlan.status).toBe(403);
+    await expect(foreignPlan.json()).resolves.toMatchObject({ error: "forbidden_contributor" });
 
     for (const [signalType, payload] of [
       ["queue-health", { repoFullName: "entrius/allways-ui", signals: { openPullRequests: 2 } }],
