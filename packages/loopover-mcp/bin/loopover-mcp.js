@@ -89,6 +89,10 @@ const CLI_COMMAND_SPEC = {
   "repo-decision": [],
   "contributor-profile": [],
   "monitor-open-prs": [],
+  "pr-outcomes": [],
+  "explain-review-risk": [],
+  notifications: [],
+  "notifications-read": [],
   "analyze-branch": [],
   preflight: [],
   "review-pr": [],
@@ -100,7 +104,7 @@ const CLI_COMMAND_SPEC = {
   profile: ["list", "create", "switch", "remove"],
   cache: ["status", "clear", "list"],
   agent: ["plan", "status", "explain", "packet"],
-  maintain: ["status", "queue", "approve", "reject", "pause", "resume", "set-level", "precision", "outcome-calibration", "onboarding-pack", "audit-feed", "automation-state", "refresh-docs"],
+  maintain: ["status", "queue", "propose", "approve", "reject", "pause", "resume", "set-level", "precision", "outcome-calibration", "onboarding-pack", "audit-feed", "automation-state", "refresh-docs", "generate-issue-drafts"],
 };
 const COMPLETION_SHELLS = ["bash", "zsh", "fish", "powershell"];
 const AGENT_PROFILE_IDS = ["miner-planner", "miner-auto-dev", "maintainer-triage", "repo-owner-intake"];
@@ -122,6 +126,10 @@ const AGENT_PROFILE_IDS = ["miner-planner", "miner-auto-dev", "maintainer-triage
 // purpose. Do not "sync" it to the engine list.
 const MAINTAIN_ACTION_CLASSES = ["review", "request_changes", "approve", "merge", "close", "label"];
 const MAINTAIN_AUTONOMY_LEVELS = ["observe", "auto_with_approval", "auto"];
+// #6744: the loopover_propose_action / POST .../agent/pending-actions action-class enum. A superset of
+// MAINTAIN_ACTION_CLASSES (adds review_state_label) — kept separate so `maintain propose` accepts exactly what the
+// route + MCP tool accept, while set-level keeps its own autonomy-configurable subset above.
+const PROPOSE_ACTION_CLASSES = ["review", "request_changes", "approve", "merge", "close", "label", "review_state_label"];
 
 // #6150 — plan-DAG step tracking for loopover_build_plan/loopover_plan_status/loopover_record_step_result.
 // Hand-duplicated from src/services/plan-dag.ts (packages/loopover-engine/src/services/plan-dag.ts is NOT
@@ -934,6 +942,11 @@ const STDIO_TOOL_DESCRIPTORS = [
     description: "Preflight planned PR metadata against lane, duplicate, linked issue, test, and queue signals.",
   },
   {
+    name: "loopover_explain_review_risk",
+    category: "review",
+    description: "Explain review risk for a planned PR using preflight, lane, duplicate, and role context.",
+  },
+  {
     name: "loopover_validate_linked_issue",
     category: "discovery",
     description: "Report whether linking an issue will actually earn the standard linked-issue scoring multiplier for a planned PR — open, valid, single-owner, solvable by this PR — with the blocking reason if not. The raw multiplier value stays private.",
@@ -1129,6 +1142,12 @@ const STDIO_TOOL_DESCRIPTORS = [
     category: "discovery",
     description:
       "Inspect a contributor's open PRs on registered repos, classify queue state, and return public-safe next-step packets from cached metadata.",
+  },
+  {
+    name: "loopover_pr_outcome",
+    category: "review",
+    description:
+      "Return a contributor's own post-merge outcome records — for each merged PR, a public-safe attribution of what it did for their standing on the repo. Self-scoped: only the authenticated login's outcomes.",
   },
   {
     name: "loopover_compare_pr_variants",
@@ -1505,6 +1524,19 @@ registerStdioTool(
     inputSchema: preflightShape,
   },
   async (input) => toolResult("LoopOver PR preflight.", await apiPost("/v1/preflight/pr", input)),
+);
+
+// #6980: CLI stdio mirror of loopover_explain_review_risk — proxies POST /v1/preflight/review-risk.
+registerStdioTool(
+  "loopover_explain_review_risk",
+  {
+    description: stdioToolDescription("loopover_explain_review_risk"),
+    inputSchema: preflightShape,
+  },
+  async (input) => {
+    const payload = await apiPost("/v1/preflight/review-risk", input);
+    return toolResult(payload.summary ?? `LoopOver review-risk explanation for ${input.repoFullName}.`, payload);
+  },
 );
 
 registerStdioTool(
@@ -2067,6 +2099,21 @@ registerStdioTool(
   async ({ login }) => {
     const payload = await getOpenPrMonitor(login);
     return toolResult(openPrMonitorToolSummary(login, payload), payload);
+  },
+);
+
+registerStdioTool(
+  "loopover_pr_outcome",
+  {
+    description: stdioToolDescription("loopover_pr_outcome"),
+    inputSchema: {
+      login: z.string().min(1),
+      limit: z.number().int().positive().max(100).optional(),
+    },
+  },
+  async ({ login, limit }) => {
+    const payload = await getPrOutcomes(login, limit);
+    return toolResult(prOutcomesToolSummary(login, payload), payload);
   },
 );
 
@@ -3130,6 +3177,9 @@ function printMaintainHelp() {
       "Subcommands:",
       "  status                       List the agent approval queue (auto_with_approval actions awaiting a decision).",
       "  queue                        List pending actions (id, kind, target) for approve/reject. Alias: pending.",
+      "  propose <class> <pull-num>   Stage a new auto_with_approval action for a maintainer to approve later.",
+      `                               classes: ${PROPOSE_ACTION_CLASSES.join(", ")}`,
+      "                               opts: --reason, --label, --review-body, --merge-method, --close-comment.",
       "  approve <id>                 Approve a staged action -> execute it.",
       "  reject <id>                  Reject a staged action -> cancel it.",
       "  pause                        Pause ALL agent actions on the repo (kill-switch).",
@@ -3146,6 +3196,9 @@ function printMaintainHelp() {
       "             [--pull N]        Scope the feed to one pull request.",
       "  automation-state             Show the derived agent automation state (mode, readiness, pending).",
       "  refresh-docs                 Open (or find the already-open) the AGENTS.md/CLAUDE.md generation PR.",
+      "  generate-issue-drafts        Preview contributor issue drafts (dry-run). Never creates without --create.",
+      "             [--create]        Actually open the drafted issues (requires repo write access).",
+      "             [--limit N]       Cap the drafts generated (1-20, default 5).",
       "",
       "Pass --json for machine-readable output.",
     ].join("\n") + "\n",
@@ -3211,6 +3264,26 @@ async function maintainCli(args) {
     const decision = subcommand === "approve" ? "accept" : "reject";
     const payload = await apiPost(`${queueBase}/${encodeURIComponent(positional)}/${decision}`, {});
     emit(payload, `${subcommand === "approve" ? "Accepted" : "Rejected"} ${positional}: ${payload.status ?? "ok"}${payload.executionOutcome ? ` (${payload.executionOutcome})` : ""}.`);
+    return;
+  }
+  if (subcommand === "propose") {
+    const actionClass = positional;
+    const pullArg = args[2] && !args[2].startsWith("--") ? args[2] : undefined;
+    if (!actionClass || !pullArg) {
+      throw new Error("Usage: loopover-mcp maintain propose <action-class> <pull-number> --repo owner/repo [--reason ...] [--label ...] [--review-body ...] [--merge-method merge|squash|rebase] [--close-comment ...].");
+    }
+    if (!PROPOSE_ACTION_CLASSES.includes(actionClass)) throw new Error(`Unknown action class: ${actionClass}. Use ${PROPOSE_ACTION_CLASSES.join(", ")}.`);
+    const pullNumber = Number(pullArg);
+    if (!Number.isInteger(pullNumber) || pullNumber <= 0) throw new Error(`Invalid pull number: ${pullArg}. Pass a positive integer.`);
+    const payload = await apiPost(
+      queueBase,
+      stripUndefined({ pullNumber, actionClass, reason: options.reason, label: options.label, reviewBody: options.reviewBody, mergeMethod: options.mergeMethod, closeComment: options.closeComment }),
+    );
+    const action = payload.action ?? {};
+    emit(
+      payload,
+      `${payload.created ? "Staged" : "Already staged"} ${sanitizePlainTextTerminalOutput(action.actionClass ?? actionClass)} on ${repoFullName}#${pullNumber} (${sanitizePlainTextTerminalOutput(action.status ?? "pending")}), id ${sanitizePlainTextTerminalOutput(action.id ?? "?")}.`,
+    );
     return;
   }
   if (subcommand === "pause" || subcommand === "resume") {
@@ -3342,8 +3415,29 @@ async function maintainCli(args) {
     emit(payload, line);
     return;
   }
+  if (subcommand === "generate-issue-drafts") {
+    // #6757: session-authenticated mirror of POST {repoBase}/contributor-issue-drafts/generate (and the remote
+    // loopover_generate_contributor_issue_drafts tool). Dry-run BY DEFAULT — only a bare `--create` opts into
+    // the write path, and it is forwarded as {create:true, dryRun:false}, the exact shape the route's
+    // explicit_create_requires_dry_run_false guard demands. A plain `generate-issue-drafts` can never create.
+    const create = options.create === true;
+    const parsedLimit = Number(options.limit);
+    const body = { create, dryRun: !create, ...(Number.isFinite(parsedLimit) ? { limit: parsedLimit } : {}) };
+    const payload = await apiPost(`${repoBase}/contributor-issue-drafts/generate`, body);
+    const mode = payload.dryRun ? "dry-run" : "create";
+    const lines = [
+      `Contributor issue drafts for ${repoFullName} (${mode}): ${payload.proposed ?? 0} proposed, ${payload.created ?? 0} created, ${payload.skippedDuplicate ?? 0} duplicate, ${payload.skippedDeclined ?? 0} declined, ${payload.skippedUnsafe ?? 0} unsafe, ${payload.skippedCreateFailed ?? 0} create-failed.`,
+      // draft.title/body are generated from untrusted repo issue data, so the plain-text path is sanitized (#6261).
+      ...(payload.drafts ?? []).map((draft) => {
+        const ref = draft.issue ? ` -> #${draft.issue.number} ${draft.issue.url}` : "";
+        return `- [${sanitizePlainTextTerminalOutput(draft.status)}] ${sanitizePlainTextTerminalOutput(draft.title)}${sanitizePlainTextTerminalOutput(ref)}`;
+      }),
+    ];
+    emit(payload, lines.join("\n"));
+    return;
+  }
   throw new Error(
-    `Unknown maintain subcommand: ${subcommand}. Use status | queue | approve <id> | reject <id> | pause | resume | set-level <action> <level> | precision | outcome-calibration | onboarding-pack | audit-feed | automation-state | refresh-docs.`,
+    `Unknown maintain subcommand: ${subcommand}. Use status | queue | propose <action-class> <pull-number> | approve <id> | reject <id> | pause | resume | set-level <action> <level> | precision | outcome-calibration | onboarding-pack | audit-feed | automation-state | refresh-docs | generate-issue-drafts.`,
   );
 }
 
@@ -3376,6 +3470,10 @@ async function runCli(args) {
   if (command === "repo-decision") return repoDecisionCli(options);
   if (command === "contributor-profile") return contributorProfileCli(options);
   if (command === "monitor-open-prs") return monitorOpenPrsCli(options);
+  if (command === "pr-outcomes") return prOutcomesCli(options);
+  if (command === "explain-review-risk") return explainReviewRiskCli(options);
+  if (command === "notifications") return notificationsCli(options);
+  if (command === "notifications-read") return notificationsReadCli(options);
   if (command === "review-pr") return reviewPrCli(options);
   if (command !== "analyze-branch" && command !== "preflight") {
     const suggestion = suggestCommand(command);
@@ -3836,6 +3934,156 @@ async function monitorOpenPrsCli(options) {
     process.stdout.write(`${sanitizePlainTextTerminalOutput(heading)}\n`);
     for (const step of pr.nextSteps ?? []) process.stdout.write(`  - ${sanitizePlainTextTerminalOutput(step)}\n`);
   }
+}
+
+function printPrOutcomesHelp() {
+  process.stdout.write(
+    [
+      "Usage: loopover-mcp pr-outcomes --login <github-login> [--limit N] [--json]",
+      "",
+      "List your post-merge PR outcome history (public-safe attribution per merged PR).",
+      "Mirrors the loopover_pr_outcome MCP tool and GET /v1/contributors/{login}/pr-outcomes. No source upload.",
+      "",
+      "Pass --json for machine-readable output.",
+    ].join("\n") + "\n",
+  );
+}
+
+async function prOutcomesCli(options) {
+  if (options.help === true) return printPrOutcomesHelp();
+  const login = options.login ?? process.env.LOOPOVER_LOGIN ?? process.env.GITHUB_LOGIN;
+  if (!login) throw new Error("Pass --login <github-login> or set LOOPOVER_LOGIN.");
+  const limitRaw = options.limit;
+  let limit;
+  if (limitRaw !== undefined && limitRaw !== true) {
+    const parsed = Number(limitRaw);
+    if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
+      throw new Error("Pass --limit as an integer between 1 and 100.");
+    }
+    limit = parsed;
+  }
+  const payload = await getPrOutcomes(login, limit);
+  if (options.json) {
+    process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(`${sanitizePlainTextTerminalOutput(prOutcomesToolSummary(login, payload))}\n`);
+  for (const outcome of payload?.outcomes ?? []) {
+    const heading = `${outcome.repoFullName}#${outcome.pullNumber ?? "?"} [${outcome.outcome}]`;
+    process.stdout.write(`${sanitizePlainTextTerminalOutput(heading)}\n`);
+    if (outcome.attribution) process.stdout.write(`  ${sanitizePlainTextTerminalOutput(outcome.attribution)}\n`);
+  }
+}
+
+function printExplainReviewRiskHelp() {
+  process.stdout.write(
+    [
+      "Usage: loopover-mcp explain-review-risk --repo owner/repo --title <text> [--login <github-login>] [--body <text>] [--json]",
+      "",
+      "Explain review risk for a planned PR (preflight + optional role context + recommendation).",
+      "Mirrors the loopover_explain_review_risk MCP tool and POST /v1/preflight/review-risk. No source upload.",
+      "",
+      "Pass --repo or --repoFullName, --title, and optionally --login as contributorLogin.",
+      "Pass --json for machine-readable output.",
+    ].join("\n") + "\n",
+  );
+}
+
+async function explainReviewRiskCli(options) {
+  if (options.help === true) return printExplainReviewRiskHelp();
+  const repoFullName = options.repoFullName ?? options.repo;
+  if (!repoFullName || !String(repoFullName).includes("/")) throw new Error("Pass --repo owner/repo or --repoFullName owner/repo.");
+  if (!options.title) throw new Error("Pass --title <text>.");
+  const contributorLogin = options.login ?? options.contributorLogin;
+  const labels = Array.isArray(options.label) ? options.label : options.label ? [options.label] : undefined;
+  const changedFiles = Array.isArray(options.changedFile) ? options.changedFile : options.changedFile ? [options.changedFile] : undefined;
+  const linkedIssues = Array.isArray(options.issue)
+    ? options.issue.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value > 0)
+    : options.issue
+      ? [Number(options.issue)].filter((value) => Number.isInteger(value) && value > 0)
+      : undefined;
+  const tests = Array.isArray(options.test) ? options.test : options.test ? [options.test] : undefined;
+  const payload = await apiPost(
+    "/v1/preflight/review-risk",
+    stripUndefined({
+      repoFullName,
+      title: options.title,
+      contributorLogin,
+      body: options.body,
+      labels,
+      changedFiles,
+      linkedIssues: linkedIssues && linkedIssues.length > 0 ? linkedIssues : undefined,
+      tests,
+      authorAssociation: options.authorAssociation,
+    }),
+  );
+  if (options.json) {
+    process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(`${sanitizePlainTextTerminalOutput(payload.summary ?? `LoopOver review-risk explanation for ${repoFullName}.`)}\n`);
+  if (payload.recommendation) process.stdout.write(`Recommendation: ${sanitizePlainTextTerminalOutput(payload.recommendation)}\n`);
+  if (payload.preflight?.status) process.stdout.write(`Preflight status: ${sanitizePlainTextTerminalOutput(payload.preflight.status)}\n`);
+}
+
+function printNotificationsHelp() {
+  process.stdout.write(
+    [
+      "Usage: loopover-mcp notifications --login <github-login> [--json]",
+      "",
+      "Your own badge notification feed (newest first) with an unread count, self-scoped.",
+      "Mirrors the loopover_list_notifications MCP tool and GET /v1/contributors/{login}/notifications. No source upload.",
+      "",
+      "Pass --json for machine-readable output.",
+    ].join("\n") + "\n",
+  );
+}
+
+// #6745: CLI mirror of loopover_list_notifications. Login resolves from --login / the active session /
+// LOOPOVER_LOGIN / GITHUB_LOGIN, like the sibling contributor commands.
+async function notificationsCli(options) {
+  if (options.help === true) return printNotificationsHelp();
+  const login = options.login ?? activeProfile.session?.login ?? process.env.LOOPOVER_LOGIN ?? process.env.GITHUB_LOGIN;
+  if (!login) throw new Error("Pass --login <github-login>, log in with `loopover-mcp login`, or set LOOPOVER_LOGIN.");
+  const payload = await getNotifications(login);
+  if (options.json) {
+    process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(`LoopOver notifications for ${login}: ${payload.unreadCount} unread.\n`);
+  for (const item of payload.notifications ?? []) {
+    // `login` is the user's own value; the API chooses the title text, so it is sanitized before the terminal.
+    const flag = item.status === "delivered" ? "*" : " ";
+    process.stdout.write(`${sanitizePlainTextTerminalOutput(`${flag} ${item.repoFullName}#${item.pullNumber} ${item.title}`)}\n`);
+  }
+}
+
+function printNotificationsReadHelp() {
+  process.stdout.write(
+    [
+      "Usage: loopover-mcp notifications-read --login <github-login> [--id <delivery-id>]... [--json]",
+      "",
+      "Mark your delivered notifications read. With no --id, marks all of them.",
+      "Mirrors the loopover_mark_notifications_read MCP tool and POST /v1/contributors/{login}/notifications/read.",
+      "",
+      "Pass --json for machine-readable output.",
+    ].join("\n") + "\n",
+  );
+}
+
+// #6745: CLI mirror of loopover_mark_notifications_read. Repeated --id flags collect into an ids array; omitting
+// them marks every delivered notification read (mirrors the route's absent-body behavior).
+async function notificationsReadCli(options) {
+  if (options.help === true) return printNotificationsReadHelp();
+  const login = options.login ?? activeProfile.session?.login ?? process.env.LOOPOVER_LOGIN ?? process.env.GITHUB_LOGIN;
+  if (!login) throw new Error("Pass --login <github-login>, log in with `loopover-mcp login`, or set LOOPOVER_LOGIN.");
+  const ids = Array.isArray(options.id) ? options.id : options.id ? [options.id] : undefined;
+  const payload = await postMarkNotificationsRead(login, ids);
+  if (options.json) {
+    process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(`Marked ${payload.marked} LoopOver notification(s) read for ${login}.\n`);
 }
 
 function printRepoDecisionHelp() {
@@ -4317,6 +4565,10 @@ function printHelp() {
   loopover-mcp decision-pack --login <github-login> [--json]
   loopover-mcp repo-decision --login <github-login> --repo owner/repo [--json]
   loopover-mcp monitor-open-prs --login <github-login> [--json]
+  loopover-mcp pr-outcomes --login <github-login> [--limit N] [--json]
+  loopover-mcp explain-review-risk --repo owner/repo --title <text> [--login <github-login>] [--body <text>] [--json]
+  loopover-mcp notifications --login <github-login> [--json]
+  loopover-mcp notifications-read --login <github-login> [--id <delivery-id>]... [--json]
   loopover-mcp analyze-branch --login <github-login> [--repo owner/repo] [--base origin/main] [--branch-eligibility eligible|ineligible|unknown] [--pending-merged-prs 3] [--expected-open-prs 0] [--projected-credibility 0.8] [--scenario-note "..."] [--validation "passed|npm test|summary"] [--format table] [--json]
   loopover-mcp preflight --login <github-login> [--repo owner/repo] [--base origin/main] [--branch-eligibility eligible|ineligible|unknown] [--pending-merged-prs 3] [--expected-open-prs 0] [--projected-credibility 0.8] [--validation "passed|npm test|summary"] [--format table] [--json]
   loopover-mcp review-pr --login <github-login> [--repo owner/repo] [--base origin/main] [--commit <message>]... [--body <text>] [--body-file <path>] [--linked-issue <number>] [--json]
@@ -4335,7 +4587,7 @@ function printHelp() {
   LOOPOVER_PROFILE
   LOOPOVER_CONFIG_PATH or LOOPOVER_CONFIG_DIR
   LOOPOVER_API_TOKEN, LOOPOVER_MCP_TOKEN, LOOPOVER_TOKEN, or a session from loopover-mcp login
-  LOOPOVER_LOGIN or GITHUB_LOGIN (default --login for analyze-branch, preflight, review-pr, decision-pack, repo-decision, monitor-open-prs, and agent plan/packet)
+  LOOPOVER_LOGIN or GITHUB_LOGIN (default --login for analyze-branch, preflight, review-pr, decision-pack, repo-decision, monitor-open-prs, pr-outcomes, notifications, notifications-read, and agent plan/packet)
   GITHUB_TOKEN for non-interactive login bootstrap
   GITTENSOR_SCORE_PREVIEW_CMD
   GITTENSOR_ROOT
@@ -4380,7 +4632,7 @@ Use --profile <name> or LOOPOVER_PROFILE to run login, logout, whoami, status, d
 
 function parseOptions(args) {
   const options = {};
-  const repeatable = new Set(["label", "issue", "commit", "changedFile", "test", "testFile", "validation", "validationCommand", "validationStatus", "validationSummary", "validationDuration", "scenarioNote"]);
+  const repeatable = new Set(["label", "issue", "id", "commit", "changedFile", "test", "testFile", "validation", "validationCommand", "validationStatus", "validationSummary", "validationDuration", "scenarioNote"]);
   for (let index = 0; index < args.length; index += 1) {
     const arg = args[index];
     if (arg === "--json") {
@@ -5463,12 +5715,34 @@ function getOpenPrMonitor(login) {
   return apiGet(`/v1/contributors/${encodeURIComponent(login)}/open-pr-monitor`);
 }
 
+function getPrOutcomes(login, limit) {
+  const query = new URLSearchParams();
+  if (limit != null) query.set("limit", String(limit));
+  const suffix = query.size > 0 ? `?${query}` : "";
+  return apiGet(`/v1/contributors/${encodeURIComponent(login)}/pr-outcomes${suffix}`);
+}
+
+// #6745: contributor notification feed + mark-read. `postMarkNotificationsRead` sends no ids to mark all
+// delivered notifications read, mirroring markNotificationsReadShape's optional ids.
+function getNotifications(login) {
+  return apiGet(`/v1/contributors/${encodeURIComponent(login)}/notifications`);
+}
+function postMarkNotificationsRead(login, ids) {
+  return apiPost(`/v1/contributors/${encodeURIComponent(login)}/notifications/read`, ids ? { ids } : {});
+}
+
 // Mirror the API's own `summary` when it sends one, so the CLI and the loopover_monitor_open_prs MCP
 // tool (which returns monitor.summary verbatim) never drift into two different sentences for one payload.
 function openPrMonitorToolSummary(login, payload) {
   const summary = typeof payload?.summary === "string" ? payload.summary.trim() : "";
   if (summary) return summary;
   return `LoopOver open-PR monitor for ${login}.`;
+}
+
+function prOutcomesToolSummary(login, payload) {
+  const summary = typeof payload?.summary === "string" ? payload.summary.trim() : "";
+  if (summary) return summary;
+  return `LoopOver post-merge outcomes for ${login}.`;
 }
 
 function isCacheableDecisionPack(payload, login) {

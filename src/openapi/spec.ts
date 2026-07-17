@@ -24,6 +24,9 @@ import {
   ContributorPatternReportSchema,
   ContributorDecisionPackSchema,
   ContributorOpenPrMonitorSchema,
+  ContributorPrOutcomesSchema,
+  NotificationFeedSchema,
+  NotificationsMarkedSchema,
   ContributorRewardRiskStrategySchema,
   ContributorProfileSchema,
   ContributorScoringProfileSchema,
@@ -74,6 +77,7 @@ import {
   RepositorySettingsSchema,
   RepoDocRefreshResultSchema,
   RoleContextSchema,
+  ReviewRiskExplanationSchema,
   RewardRiskActionSchema,
   ScorePreviewSchema,
   ScoringModelSnapshotSchema,
@@ -120,6 +124,7 @@ export function buildOpenApiSpec() {
   registry.register("RepoFitRecommendation", RepoFitRecommendationSchema);
   registry.register("PreflightResult", PreflightResultSchema);
   registry.register("LocalDiffPreflightResult", LocalDiffPreflightResultSchema);
+  registry.register("ReviewRiskExplanation", ReviewRiskExplanationSchema);
   registry.register("LocalBranchAnalysis", LocalBranchAnalysisSchema);
   registry.register("MaintainerPacket", MaintainerPacketSchema);
   registry.register("MaintainerLaneReport", MaintainerLaneReportSchema);
@@ -778,6 +783,55 @@ export function buildOpenApiSpec() {
   });
   registry.registerPath({
     method: "get",
+    path: "/v1/contributors/{login}/pr-outcomes",
+    summary: "Contributor post-merge PR outcome history",
+    request: {
+      params: z.object({ login: z.string() }),
+      query: z.object({ limit: z.coerce.number().int().positive().max(100).optional() }),
+    },
+    responses: {
+      200: {
+        description: "Self-scoped post-merge outcome records with public-safe attribution (mirrors loopover_pr_outcome).",
+        content: { "application/json": { schema: ContributorPrOutcomesSchema } },
+      },
+    },
+  });
+  registry.registerPath({
+    method: "get",
+    path: "/v1/contributors/{login}/notifications",
+    summary: "Contributor badge notification feed",
+    request: { params: z.object({ login: z.string() }) },
+    responses: {
+      200: {
+        description: "The contributor's own badge notification feed (self-scoped), newest first, with an unread count.",
+        content: { "application/json": { schema: NotificationFeedSchema } },
+      },
+    },
+  });
+  registry.registerPath({
+    method: "post",
+    path: "/v1/contributors/{login}/notifications/read",
+    summary: "Mark contributor notifications read",
+    request: {
+      params: z.object({ login: z.string() }),
+      body: {
+        content: {
+          "application/json": {
+            schema: z.object({ ids: z.array(z.string()).optional() }),
+          },
+        },
+      },
+    },
+    responses: {
+      200: {
+        description: "Marks the contributor's delivered badge notifications read; an absent/empty ids array marks all.",
+        content: { "application/json": { schema: NotificationsMarkedSchema } },
+      },
+      400: { description: "Invalid mark-read body" },
+    },
+  });
+  registry.registerPath({
+    method: "get",
     path: "/v1/contributors/{login}/repos/{owner}/{repo}/decision",
     summary: "Repository-specific contributor decision",
     request: { params: z.object({ login: z.string(), owner: z.string(), repo: z.string() }) },
@@ -793,6 +847,16 @@ export function buildOpenApiSpec() {
     responses: {
       200: { description: "Submission preflight result", content: { "application/json": { schema: PreflightResultSchema } } },
       400: { description: "Invalid preflight input" },
+    },
+  });
+  registry.registerPath({
+    method: "post",
+    path: "/v1/preflight/review-risk",
+    summary: "Explain review risk for a planned pull request",
+    responses: {
+      200: { description: "Review-risk explanation with preflight, role context, and recommendation", content: { "application/json": { schema: ReviewRiskExplanationSchema } } },
+      400: { description: "Invalid preflight input" },
+      403: { description: "Forbidden when contributorLogin does not match the authenticated session" },
     },
   });
   registry.registerPath({

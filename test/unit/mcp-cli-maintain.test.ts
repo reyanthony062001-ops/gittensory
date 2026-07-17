@@ -95,6 +95,34 @@ describe("loopover-mcp CLI — maintain (#784)", () => {
     expect(scoped).toMatch(/Gate precision for owner\/repo \(last 30d\)/);
   });
 
+  it("generate-issue-drafts dry-runs by default and never forwards create (#6757)", async () => {
+    const bodies: Array<{ dryRun?: boolean; create?: boolean; limit?: number }> = [];
+    const e = await env({ onIssueDraftRequest: (b) => bodies.push(b) });
+    const out = await runAsync(["maintain", "generate-issue-drafts", "--repo", "owner/repo"], e);
+    // A bare invocation must send {create:false, dryRun:true} — the tool can never silently create.
+    expect(bodies[0]).toMatchObject({ create: false, dryRun: true });
+    expect(out).toMatch(/Contributor issue drafts for owner\/repo \(dry-run\): 1 proposed, 0 created/);
+    // The generated draft title carries an ANSI escape; the plain-text path must strip it (#6261).
+    expect(out).toContain("Add cursor pagination");
+    expect(out).not.toContain("[31m");
+  });
+
+  it("generate-issue-drafts --create forwards {create:true, dryRun:false} and reports created issues (#6757)", async () => {
+    const bodies: Array<{ dryRun?: boolean; create?: boolean; limit?: number }> = [];
+    const e = await env({ onIssueDraftRequest: (b) => bodies.push(b) });
+    const out = await runAsync(["maintain", "generate-issue-drafts", "--repo", "owner/repo", "--create", "--limit", "3"], e);
+    // --create maps to the exact {create:true, dryRun:false} shape the route's create-safety guard demands,
+    // and --limit is forwarded as a number.
+    expect(bodies[0]).toMatchObject({ create: true, dryRun: false, limit: 3 });
+    expect(out).toMatch(/\(create\): 1 proposed, 1 created/);
+    expect(out).toMatch(/#42 https:\/\/github\.com\/owner\/repo\/issues\/42/);
+    const json = JSON.parse(await runAsync(["maintain", "generate-issue-drafts", "--repo", "owner/repo", "--json"], e)) as {
+      dryRun: boolean;
+      createRequested: boolean;
+    };
+    expect(json).toMatchObject({ dryRun: true, createRequested: false });
+  });
+
   it("outcome-calibration reports slop-band merge rates + recommendation outcomes (plain + json), passing the window through (#6735)", async () => {
     const e = await env();
     const out = await runAsync(["maintain", "outcome-calibration", "--repo", "owner/repo"], e);
@@ -213,6 +241,29 @@ describe("loopover-mcp CLI — maintain (#784)", () => {
     expect(out).toBe("No repo-doc pull request opened for owner/repo: no changes needed\n");
   });
 
+  it("propose stages a new action (plain + json), POSTing to the bare pending-actions path", async () => {
+    const requests: Array<{ url: string; method: string }> = [];
+    const e = await env({ onApiRequest: (request) => void requests.push({ url: request.url ?? "", method: request.method ?? "" }) });
+    const plain = await runAsync(["maintain", "propose", "review", "7", "--repo", "owner/repo", "--reason", "needs a look"], e);
+    expect(plain).toMatch(/Staged review on owner\/repo#7 \(pending\), id pa-1\./);
+    // The bare create path (no trailing slash) — distinct from the decision `/:id/:decision` POST.
+    expect(requests.at(-1)).toEqual({ url: "/v1/repos/owner/repo/agent/pending-actions", method: "POST" });
+    const json = JSON.parse(await runAsync(["maintain", "propose", "merge", "7", "--repo", "owner/repo", "--merge-method", "squash", "--json"], e)) as {
+      created: boolean;
+      action: { actionClass: string; pullNumber: number };
+    };
+    expect(json).toMatchObject({ created: true, action: { actionClass: "merge", pullNumber: 7 } });
+  });
+
+  it("propose validates the action class and pull number before any request", async () => {
+    const e = await env();
+    await expect(runAsync(["maintain", "propose", "--repo", "owner/repo"], e)).rejects.toThrow(/Usage: loopover-mcp maintain propose/);
+    await expect(runAsync(["maintain", "propose", "review", "--repo", "owner/repo"], e)).rejects.toThrow(/Usage: loopover-mcp maintain propose/);
+    await expect(runAsync(["maintain", "propose", "bogus", "7", "--repo", "owner/repo"], e)).rejects.toThrow(/Unknown action class/);
+    await expect(runAsync(["maintain", "propose", "review", "0", "--repo", "owner/repo"], e)).rejects.toThrow(/Invalid pull number/);
+    await expect(runAsync(["maintain", "propose", "review", "1.5", "--repo", "owner/repo"], e)).rejects.toThrow(/Invalid pull number/);
+  }, 45_000);
+
   it("validates inputs: --repo required, id required for approve, known subcommand + action/level", async () => {
     const e = await env();
     await expect(runAsync(["maintain", "status"], e)).rejects.toThrow(/Pass --repo/);
@@ -253,6 +304,7 @@ describe("loopover-mcp CLI — maintain (#784)", () => {
     const out = await runAsync(["maintain"], e);
     expect(out).toMatch(/Usage: loopover-mcp maintain/);
     expect(out).toMatch(/approve <id>/);
+    expect(out).toMatch(/propose <class> <pull-num>/);
     expect(out).toMatch(/queue/);
     expect(out).toMatch(/pause/);
     expect(out).toMatch(/onboarding-pack/);

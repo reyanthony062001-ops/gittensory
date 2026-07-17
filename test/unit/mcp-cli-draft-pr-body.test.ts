@@ -82,7 +82,7 @@ describe("loopover_draft_pr_body stdio mirror (#6741)", () => {
       arguments: {
         login: "JSONbored",
         cwd: repoDir,
-        repoFullName: "JSONbored/gittensory",
+        repoFullName: "JSONbored/loopover",
         baseRef: "HEAD",
       },
     });
@@ -98,7 +98,7 @@ describe("loopover_draft_pr_body stdio mirror (#6741)", () => {
     expect(data.title).toBe("Local branch preflight");
     // Parity: same engine export over the fixture analysis shape yields the same markdown.
     const expected = buildPublicPrBodyDraft({
-      repoFullName: "JSONbored/gittensory",
+      repoFullName: "JSONbored/loopover",
       prPacket: {
         titleSuggestion: "Local branch preflight",
         bodySections: [
@@ -133,7 +133,7 @@ describe("loopover_draft_pr_body stdio mirror (#6741)", () => {
       arguments: {
         login: "JSONbored",
         cwd: repoDir,
-        repoFullName: "JSONbored/gittensory",
+        repoFullName: "JSONbored/loopover",
         baseRef: "HEAD",
         format: "markdown",
       },
@@ -142,7 +142,7 @@ describe("loopover_draft_pr_body stdio mirror (#6741)", () => {
     const data = structured(result);
     expect(data).toMatchObject({
       title: "Local branch preflight",
-      repoFullName: "JSONbored/gittensory",
+      repoFullName: "JSONbored/loopover",
       sourceUploadDisabled: true,
     });
     expect(typeof data.markdown).toBe("string");

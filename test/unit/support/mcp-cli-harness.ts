@@ -173,9 +173,18 @@ export async function startFixtureServer(
     slopRiskStatus?: number;
     prTextLintStatus?: number;
     onPacketRequest?: (body: unknown) => void;
+    onIssueDraftRequest?: (body: { dryRun?: boolean; create?: boolean; limit?: number }) => void;
     onApiRequest?: (request: IncomingMessage) => void;
     validateConfigWarnings?: string[];
     openPrMonitor?: Record<string, unknown>;
+    prOutcomes?: Record<string, unknown>;
+    /** #6980: overrides POST /v1/preflight/review-risk and captures the request body. */
+    reviewRisk?: Record<string, unknown>;
+    onReviewRiskRequest?: (body: unknown) => void;
+    /** #6745: overrides the notification feed / mark-read responses, and captures the mark-read POST body. */
+    notifications?: Record<string, unknown>;
+    notificationsRead?: Record<string, unknown>;
+    onMarkNotificationsRead?: (body: unknown) => void;
     intakeStatus?: number;
     localBranchAnalysisStatus?: number;
     /** #6743: overrides the repo-doc refresh route's default "opened a new PR" response, e.g. to exercise
@@ -311,6 +320,21 @@ export async function startFixtureServer(
       response.end(JSON.stringify({ ...openPrMonitorFixture(), ...(options.openPrMonitor ?? {}) }));
       return;
     }
+    const prOutcomesMatch = request.url?.match(/^\/v1\/contributors\/([^/]+)\/pr-outcomes(?:\?(.*))?$/);
+    if (prOutcomesMatch && request.method === "GET") {
+      const login = decodeURIComponent(prOutcomesMatch[1]!);
+      response.end(JSON.stringify({ ...prOutcomesFixture(login), ...(options.prOutcomes ?? {}) }));
+      return;
+    }
+    if (request.url === "/v1/contributors/JSONbored/notifications" && request.method === "GET") {
+      response.end(JSON.stringify({ ...notificationsFixture(), ...(options.notifications ?? {}) }));
+      return;
+    }
+    if (request.url === "/v1/contributors/JSONbored/notifications/read" && request.method === "POST") {
+      options.onMarkNotificationsRead?.(await readJsonRequest(request));
+      response.end(JSON.stringify({ login: "jsonbored", marked: 2, ...(options.notificationsRead ?? {}) }));
+      return;
+    }
     if (request.url === "/v1/contributors/JSONbored/repos/JSONbored/loopover/decision" && request.method === "GET") {
       if (options.repoDecisionStatus && options.repoDecisionStatus >= 400) {
         response.statusCode = options.repoDecisionStatus;
@@ -394,6 +418,16 @@ export async function startFixtureServer(
       response.end(JSON.stringify(withTerminalInjection(slopRiskFixture(body), options.terminalInjection)));
       return;
     }
+    if (request.url === "/v1/preflight/review-risk" && request.method === "POST") {
+      const body = (await readJsonRequest(request)) as {
+        repoFullName?: string;
+        title?: string;
+        contributorLogin?: string;
+      };
+      options.onReviewRiskRequest?.(body);
+      response.end(JSON.stringify({ ...reviewRiskFixture(body), ...(options.reviewRisk ?? {}) }));
+      return;
+    }
     if (request.url === "/v1/lint/improvement-potential" && request.method === "POST") {
       const body = (await readJsonRequest(request)) as {
         changedFiles?: Array<{ path: string; additions?: number; deletions?: number }>;
@@ -461,6 +495,15 @@ export async function startFixtureServer(
           pendingActions: [options.terminalInjection ? { ...action, reason: options.terminalInjection, actionClass: options.terminalInjection } : action],
         }),
       );
+      return;
+    }
+    // #6744 propose: the CREATE side of the approval queue — bare path POST (no trailing slash), so it does NOT
+    // collide with the decision `.../pending-actions/:id/:decision` POST stub below. Echoes the posted actionClass
+    // + pullNumber so a test can assert the CLI serialized the right body.
+    if (request.url === "/v1/repos/owner/repo/agent/pending-actions" && request.method === "POST") {
+      const body = (await readJsonRequest(request)) as { pullNumber?: number; actionClass?: string; reason?: string | null };
+      const action = { id: "pa-1", actionClass: body.actionClass ?? "merge", pullNumber: body.pullNumber ?? 7, status: "pending", reason: body.reason ?? null };
+      response.end(JSON.stringify({ created: true, action: options.terminalInjection ? { ...action, actionClass: options.terminalInjection } : action }));
       return;
     }
     if (request.url === "/v1/repos/owner/repo/maintainer-noise" && request.method === "GET") {
@@ -597,6 +640,34 @@ export async function startFixtureServer(
           ],
           recommendations: { total: 20, positive: 14, negative: 3, pending: 3, positiveRate: 0.82 },
           signals: ["Higher-slop bands merge less often — the slop signal is tracking real outcomes."],
+        }),
+      );
+      return;
+    }
+    if (request.url === "/v1/repos/owner/repo/contributor-issue-drafts/generate" && request.method === "POST") {
+      // Reflect the forwarded {dryRun, create, limit} back so the CLI test can assert the exact body it sent.
+      // The draft title carries an ANSI escape to prove the plain-text path is sanitized (#6261).
+      const requestBody = (await readJsonRequest(request)) as { dryRun?: boolean; create?: boolean; limit?: number };
+      options.onIssueDraftRequest?.(requestBody);
+      response.end(
+        JSON.stringify({
+          repoFullName: "owner/repo",
+          generatedAt: "2026-05-30T00:00:00.000Z",
+          dryRun: requestBody.dryRun ?? true,
+          createRequested: requestBody.create ?? false,
+          proposed: 1,
+          skippedDuplicate: 0,
+          skippedDeclined: 0,
+          skippedUnsafe: 0,
+          created: requestBody.create ? 1 : 0,
+          skippedCreateFailed: 0,
+          drafts: [
+            {
+              status: "proposed",
+              title: "Add [31mcursor[0m pagination",
+              ...(requestBody.create ? { issue: { number: 42, url: "https://github.com/owner/repo/issues/42" } } : {}),
+            },
+          ],
         }),
       );
       return;
@@ -873,6 +944,94 @@ export function openPrMonitorFixture() {
       },
     ],
   };
+}
+
+/** Mirrors GET /v1/contributors/:login/pr-outcomes / buildContributorPrOutcomes. */
+export function prOutcomesFixture(login = "JSONbored") {
+  return {
+    login: login.toLowerCase(),
+    count: 1,
+    summary: `LoopOver post-merge outcomes for ${login}: 1 merged PR(s).`,
+    outcomes: [
+      {
+        repoFullName: "JSONbored/loopover",
+        pullNumber: 42,
+        outcome: "merged" as const,
+        attribution: "Your pull request JSONbored/loopover#42 merged. Merged contributions strengthen your standing.",
+        deeplink: "https://github.com/JSONbored/loopover/pull/42",
+        recordedAt: "2026-06-01T00:00:00.000Z",
+      },
+    ],
+  };
+}
+
+/** #6980: mirrors POST /v1/preflight/review-risk / buildReviewRiskExplanation. */
+export function reviewRiskFixture(input: { repoFullName?: string; title?: string; contributorLogin?: string } = {}) {
+  const repoFullName = input.repoFullName ?? "JSONbored/loopover";
+  return {
+    preflight: {
+      repoFullName,
+      generatedAt: "2026-06-01T00:00:00.000Z",
+      status: "ready" as const,
+      lane: { lane: "direct_pr", reasons: ["Fixture lane."] },
+      reviewBurden: "low" as const,
+      linkedIssues: [] as number[],
+      findings: [] as unknown[],
+      collisions: [] as unknown[],
+    },
+    roleContext: input.contributorLogin
+      ? {
+          login: input.contributorLogin.toLowerCase(),
+          repoFullName,
+          generatedAt: "2026-06-01T00:00:00.000Z",
+          role: "outside_contributor" as const,
+          maintainerLane: false,
+          normalContributorEvidenceAllowed: true,
+          source: "unknown" as const,
+          reasons: ["Fixture role context."],
+          guidance: "Outside-contributor work is scoreable when the lane fits.",
+        }
+      : null,
+    recommendation: "review" as const,
+    summary: `LoopOver review-risk explanation for ${repoFullName}.`,
+  };
+}
+
+/** #6745: mirrors the NotificationFeed { login, unreadCount, notifications } shape the route/tool returns. */
+export function notificationsFixture() {
+  return {
+    login: "jsonbored",
+    unreadCount: 1,
+    notifications: [
+      {
+        id: "d-42",
+        eventType: "pull_request_merged",
+        repoFullName: "JSONbored/loopover",
+        pullNumber: 42,
+        title: "Your pull request JSONbored/loopover#42 was merged.",
+        body: "Nice work.",
+        deeplink: "https://github.com/JSONbored/loopover/pull/42",
+        status: "delivered",
+        createdAt: "2026-06-01T00:00:00.000Z",
+      },
+      {
+        id: "d-7",
+        eventType: "pull_request_changes_requested",
+        repoFullName: "JSONbored/loopover",
+        pullNumber: 7,
+        title: "Changes requested on JSONbored/loopover#7.",
+        body: "Please address review.",
+        deeplink: "https://github.com/JSONbored/loopover/pull/7",
+        status: "read",
+        createdAt: "2026-05-20T00:00:00.000Z",
+      },
+    ],
+  };
+}
+
+/** #6745: mirrors the { login, marked } shape POST /notifications/read returns. */
+export function notificationsReadFixture() {
+  return { login: "jsonbored", marked: 2 };
 }
 
 export function decisionPackFixture() {

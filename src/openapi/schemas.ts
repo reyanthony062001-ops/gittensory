@@ -463,6 +463,53 @@ export const ContributorOpenPrMonitorSchema = z
   })
   .openapi("ContributorOpenPrMonitor");
 
+export const ContributorPrOutcomesSchema = z
+  .object({
+    login: z.string(),
+    count: z.number(),
+    summary: z.string(),
+    outcomes: z.array(
+      z.object({
+        repoFullName: z.string(),
+        pullNumber: z.number().nullable(),
+        outcome: z.literal("merged"),
+        attribution: z.string(),
+        deeplink: z.string(),
+        recordedAt: z.string(),
+      }),
+    ),
+  })
+  .openapi("ContributorPrOutcomes");
+
+export const NotificationFeedItemSchema = z
+  .object({
+    id: z.string(),
+    eventType: z.string(),
+    repoFullName: z.string(),
+    pullNumber: z.number().nullable(),
+    title: z.string(),
+    body: z.string(),
+    deeplink: z.string(),
+    status: z.enum(["delivered", "read"]),
+    createdAt: z.string(),
+  })
+  .openapi("NotificationFeedItem");
+
+export const NotificationFeedSchema = z
+  .object({
+    login: z.string(),
+    unreadCount: z.number(),
+    notifications: z.array(NotificationFeedItemSchema),
+  })
+  .openapi("NotificationFeed");
+
+export const NotificationsMarkedSchema = z
+  .object({
+    login: z.string(),
+    marked: z.number(),
+  })
+  .openapi("NotificationsMarked");
+
 export const ContributorOpportunitySchema = z
   .object({
     repoFullName: z.string(),
@@ -1860,6 +1907,15 @@ export const RoleContextSchema = z
     guidance: z.string(),
   })
   .openapi("RoleContext");
+
+export const ReviewRiskExplanationSchema = z
+  .object({
+    preflight: PreflightResultSchema,
+    roleContext: RoleContextSchema.nullable(),
+    recommendation: z.enum(["likely_duplicate", "maintainer_lane", "needs_author", "review", "watch"]),
+    summary: z.string(),
+  })
+  .openapi("ReviewRiskExplanation");
 
 const ContributorOutcomeCountsSchema = z.object({
   pullRequests: z.number(),
