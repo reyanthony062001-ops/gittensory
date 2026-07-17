@@ -1,7 +1,7 @@
 {
   "packages/loopover-engine/src/signals/engine.ts": 2,
-  "packages/loopover-mcp/bin/loopover-mcp.js": 5,
-  "src/api/routes.ts": 3,
+  "packages/loopover-mcp/bin/loopover-mcp.js": 3,
+  "src/api/routes.ts": 2,
   "src/db/repositories.ts": 1,
   "src/github/app.ts": 11,
   "src/github/backfill.ts": 7,
@@ -12,7 +12,6 @@
   "src/queue/processors.ts": 6,
   "src/review/check-names.ts": 8,
   "src/review/contributor-calibration.ts": 2,
-  "src/review/enrichment-analyzers-taxonomy.ts": 1,
   "src/review/enrichment-wire.ts": 1,
   "src/review/ops-wire.ts": 3,
   "src/review/outcomes-wire.ts": 2,
