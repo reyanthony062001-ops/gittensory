@@ -246,6 +246,36 @@ describe("fetchSelfReviewContext (#5145)", () => {
     expect(result.issueQuality?.issues[0]?.warnings.join(" ")).not.toMatch(/bounty/i);
     expect("bounties" in result).toBe(false);
   });
+
+  // #6769: a real linked PR needs a CLOSING KEYWORD, matching the host's extractLinkedPrNumbers. The miner's
+  // copy had a bare `PR #N` pattern, so an incidental mention made the issue-quality report read the issue as
+  // "already references a PR" — and the miner skipped an issue that was actually available.
+  it("REGRESSION (#6769): a bare 'PR #N' mention in an issue body does NOT count as a linked PR", async () => {
+    const fetchImpl = routedFetch({
+      "/repos/acme/widgets/issues": () =>
+        jsonResponse([issuePayload({ body: "Uploads fail. This looks similar to what we saw in PR #501, worth a look." })]),
+      "/repos/acme/widgets/pulls": () => jsonResponse([]),
+      "/repos/acme/widgets": () => jsonResponse(REPO_PAYLOAD),
+      "raw.githubusercontent.com": () => jsonResponse(null, 404),
+      "api.gittensor.io/miners": () => jsonResponse([]),
+    });
+
+    const result = await fetchSelfReviewContext("acme/widgets", { fetchImpl: fetchImpl as never });
+    expect(result.issues[0]?.linkedPrs).toEqual([]);
+  });
+
+  it("REGRESSION (#6769): a closing-keyword 'Closes PR #N' DOES count as a linked PR", async () => {
+    const fetchImpl = routedFetch({
+      "/repos/acme/widgets/issues": () => jsonResponse([issuePayload({ body: "Closes PR #501" })]),
+      "/repos/acme/widgets/pulls": () => jsonResponse([]),
+      "/repos/acme/widgets": () => jsonResponse(REPO_PAYLOAD),
+      "raw.githubusercontent.com": () => jsonResponse(null, 404),
+      "api.gittensor.io/miners": () => jsonResponse([]),
+    });
+
+    const result = await fetchSelfReviewContext("acme/widgets", { fetchImpl: fetchImpl as never });
+    expect(result.issues[0]?.linkedPrs).toEqual([501]);
+  });
   it("returns false for inDuplicateCluster when no linkedIssues are supplied", async () => {
     const fetchImpl = routedFetch({
       "/repos/acme/widgets/issues": () => jsonResponse([issuePayload()]),

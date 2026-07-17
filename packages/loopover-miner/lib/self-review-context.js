@@ -203,8 +203,11 @@ async function fetchRepositoryRecord(target, resolved) {
   };
 }
 
-// Mirrors src/db/repositories.ts's extractLinkedPrNumbers exactly.
-const LINKED_PR_PATTERN = /\b(?:PR|pull request)\s+#(\d+)\b/gi;
+// Mirrors src/db/repositories.ts's extractLinkedPrNumbers: a real link needs a CLOSING KEYWORD, not a bare
+// mention (#6769). Without the keyword prefix, an incidental "similar to what we saw in PR #501" in an issue
+// body counted as a linked PR, so the issue-quality report read the issue as "already references a PR" and the
+// miner skipped an available issue (the host's own #issue-body-pr-mention-pollution fix, never ported here).
+const LINKED_PR_PATTERN = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+(?:PR|pull request)\s+#(\d+)\b/gi;
 function extractLinkedPrNumbers(body) {
   const numbers = [];
   for (const match of body.matchAll(LINKED_PR_PATTERN)) {
