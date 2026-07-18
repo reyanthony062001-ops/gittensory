@@ -174,6 +174,7 @@ export async function startFixtureServer(
     prTextLintStatus?: number;
     onPacketRequest?: (body: unknown) => void;
     onIssueDraftRequest?: (body: { dryRun?: boolean; create?: boolean; limit?: number }) => void;
+    onWatchRequest?: (req: { method: string; body: { repoFullName?: string; labels?: string[] } }) => void;
     onApiRequest?: (request: IncomingMessage) => void;
     validateConfigWarnings?: string[];
     openPrMonitor?: Record<string, unknown>;
@@ -314,6 +315,24 @@ export async function startFixtureServer(
           summary: "3 registered repos; 12 merged PRs; strongest in review-tooling.",
         }),
       );
+      return;
+    }
+    // #6746: GET/POST/DELETE /v1/contributors/:login/watches. GET returns a fixed list; POST/DELETE reflect the
+    // forwarded {repoFullName, labels} so the CLI test can assert the exact body + verb it sent.
+    const watchesMatch = /^\/v1\/contributors\/([^/]+)\/watches$/.exec(new URL(request.url ?? "/", "http://localhost").pathname);
+    if (watchesMatch && (request.method === "GET" || request.method === "POST" || request.method === "DELETE")) {
+      if (request.method === "GET") {
+        response.end(JSON.stringify({ watching: [{ repoFullName: "acme/widgets", labels: ["bug"] }, { repoFullName: "acme/gadgets", labels: [] }] }));
+        return;
+      }
+      const requestBody = (await readJsonRequest(request)) as { repoFullName?: string; labels?: string[] };
+      options.onWatchRequest?.({ method: request.method, body: requestBody });
+      if (request.method === "POST") {
+        const labelSuffix = requestBody.labels && requestBody.labels.length > 0 ? ` (labels: ${requestBody.labels.join(", ")})` : "";
+        response.end(JSON.stringify({ watching: [{ repoFullName: requestBody.repoFullName, labels: requestBody.labels ?? [] }], changed: `watching ${requestBody.repoFullName}${labelSuffix}` }));
+      } else {
+        response.end(JSON.stringify({ watching: [], changed: `unwatched ${requestBody.repoFullName}` }));
+      }
       return;
     }
     if (request.url === "/v1/contributors/JSONbored/open-pr-monitor" && request.method === "GET") {

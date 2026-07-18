@@ -120,6 +120,9 @@ import {
   deleteRepositoryLinearKey,
   getGlobalAgentFrozenState,
   setGlobalAgentFrozen,
+  upsertIssueWatchSubscription,
+  listIssueWatchSubscriptionsForLogin,
+  deleteIssueWatchSubscription,
 } from "../db/repositories";
 import { dedupeSignalSnapshots, pruneExpiredRecords, RETENTION_POLICY } from "../db/retention";
 import {
@@ -200,6 +203,7 @@ import {
 import {
   buildStaticControlPanelRoleSummary,
   canLoginAccessRepo,
+  canWatchRepo,
   loadControlPanelAccessScope,
   loadControlPanelRoleSummary,
 } from "../services/control-panel-roles";
@@ -453,6 +457,13 @@ const MAX_LOCAL_BRANCH_TEXT_CHARS = 4000;
 // (src/mcp/server.ts) minus `login` (which is the path param): `ids` is optional (absent = mark all delivered).
 const markNotificationsReadBodySchema = z.object({
   ids: z.array(z.string().min(1).max(MAX_NOTIFICATION_DELIVERY_ID_LENGTH)).max(MAX_NOTIFICATION_MARK_READ_IDS).optional(),
+});
+
+// #6746: body of POST/DELETE /v1/contributors/:login/watches. Mirrors watchIssuesShape (src/mcp/server.ts) minus
+// `login` (path param) and `action` (the HTTP verb). `labels` is POST-only (a DELETE ignores it).
+const watchSubscriptionBodySchema = z.object({
+  repoFullName: z.string().min(3).max(200),
+  labels: z.array(z.string().min(1).max(100)).max(50).optional(),
 });
 
 const preflightSchema = z.object({
@@ -3425,6 +3436,44 @@ export function createApp() {
     if (!parsed.success) return c.json({ error: "invalid_mark_read", issues: parsed.error.issues }, 400);
     const marked = await markNotificationDeliveriesRead(c.env, login, parsed.data.ids);
     return c.json({ login: login.toLowerCase(), marked });
+  });
+
+  // #6746: REST mirror of the `loopover_watch_issues` MCP tool (LoopoverMcp.watchIssues) — manage a contributor's
+  // own issue-watch subscriptions. The MCP tool's `action` enum splits across the HTTP verbs: GET=list, POST=watch,
+  // DELETE=unwatch. Every verb is self-scoped via requireContributorAccess (a session may only touch its own
+  // login), and the mutating verbs reuse canWatchRepo — the same gate requireWatchableRepo applies in the MCP tool.
+  const listWatches = async (env: Env, login: string) =>
+    (await listIssueWatchSubscriptionsForLogin(env, login)).map((sub) => ({ repoFullName: sub.repoFullName, labels: sub.labels }));
+
+  app.get("/v1/contributors/:login/watches", async (c) => {
+    const login = c.req.param("login");
+    const unauthorized = await requireContributorAccess(c, login);
+    if (unauthorized) return unauthorized;
+    return c.json({ watching: await listWatches(c.env, login) });
+  });
+
+  app.post("/v1/contributors/:login/watches", async (c) => {
+    const login = c.req.param("login");
+    const unauthorized = await requireContributorAccess(c, login);
+    if (unauthorized) return unauthorized;
+    const parsed = watchSubscriptionBodySchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: "invalid_watch_request", issues: parsed.error.issues }, 400);
+    if (!(await canWatchRepo(c.env, login, parsed.data.repoFullName))) return c.json({ error: "forbidden_repo" }, 403);
+    await upsertIssueWatchSubscription(c.env, { login, repoFullName: parsed.data.repoFullName, labels: parsed.data.labels });
+    const labelSuffix = parsed.data.labels && parsed.data.labels.length > 0 ? ` (labels: ${parsed.data.labels.join(", ")})` : "";
+    return c.json({ watching: await listWatches(c.env, login), changed: `watching ${parsed.data.repoFullName}${labelSuffix}` });
+  });
+
+  app.delete("/v1/contributors/:login/watches", async (c) => {
+    const login = c.req.param("login");
+    const unauthorized = await requireContributorAccess(c, login);
+    if (unauthorized) return unauthorized;
+    const parsed = watchSubscriptionBodySchema.safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: "invalid_watch_request", issues: parsed.error.issues }, 400);
+    if (!(await canWatchRepo(c.env, login, parsed.data.repoFullName))) return c.json({ error: "forbidden_repo" }, 403);
+    const removed = await deleteIssueWatchSubscription(c.env, login, parsed.data.repoFullName);
+    const changed = removed ? `unwatched ${parsed.data.repoFullName}` : `was not watching ${parsed.data.repoFullName}`;
+    return c.json({ watching: await listWatches(c.env, login), changed });
   });
 
   app.get("/v1/contributors/:login/repos/:owner/:repo/decision", async (c) => {
