@@ -21,7 +21,9 @@ for multiline values like the GitHub App private key.
   `LOOPOVER_MCP_TOKEN`, `INTERNAL_JOB_TOKEN`, `SELFHOST_SETUP_TOKEN`) ship commented out on purpose.
   Generate a distinct random value for each one (e.g. `openssl rand -hex 32`) — never reuse the same
   string across more than one of them. The app refuses to boot if any of these is left at a
-  known-placeholder or too-short value.
+  known-placeholder or too-short value. Prefer skipping this by hand entirely: run
+  `./scripts/selfhost-init-secrets.sh` instead, which generates and writes each of these for you
+  under `secrets/` (see `secrets/README.md`) — no `openssl` command required.
 </Callout>
 
 <Callout variant="note">

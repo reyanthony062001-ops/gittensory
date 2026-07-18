@@ -37,10 +37,13 @@ migrate one secret at a time, or never migrate at all.
 To use a secret file instead of an inline `.env` value:
 
 1. Remove (or leave commented) the plain `<NAME>=...` line in `.env`.
-2. Write the raw secret value into the matching file below, with no surrounding quotes and no
-   trailing newline requirement (the loader trims whitespace):
+2. Get a real value into the matching file below. For most of them, running
+   `./scripts/selfhost-init-secrets.sh` (#4928) already did this step for you — it generates a
+   random value for every file EXCEPT `github_app_private_key.pem`, `orb_enrollment_secret.txt`,
+   `pagerduty_routing_key.txt`, and `claude_code_oauth_token.txt` (those four come from an external
+   party, so there's no "generate" step — write the real issued value in yourself):
    ```sh
-   printf '%s' 'your-real-secret-value' > secrets/github_webhook_secret.txt
+   printf '%s' 'your-real-secret-value' > secrets/orb_enrollment_secret.txt
    ```
    For the GitHub App private key specifically, write the full PEM file as-is:
    ```sh
@@ -77,7 +80,9 @@ of those too; add a matching `secrets:` entry in `docker-compose.yml` (or a
 ## Never commit real files here
 
 Everything in this directory except this README is gitignored. `scripts/selfhost-init-secrets.sh`
-only ever creates **empty** placeholder files (so `docker compose build`/`up` never fails on a
-missing file) and only ever touches the *permissions* of a file that is still empty, never its
-content — the moment you write a real value into one, both the content and whatever mode you set
-are left alone on every future run. Always safe to re-run.
+generates a real random value for the seven self-generatable files (so `docker compose build`/`up`
+never fails on a missing file, and boots without any manual `openssl` step) and creates only an
+**empty** placeholder for the four externally-issued ones it can't generate a usable value for. Either
+way, it only ever touches the *permissions* of a file that is still empty, never its content — the
+moment a real value lands in one (written by the script or by you), both the content and whatever
+mode you set are left alone on every future run. Always safe to re-run.
