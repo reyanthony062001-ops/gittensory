@@ -93,6 +93,7 @@ const CLI_COMMAND_SPEC = {
   "explain-review-risk": [],
   notifications: [],
   "notifications-read": [],
+  watch: ["list", "add", "remove"],
   "analyze-branch": [],
   preflight: [],
   "review-pr": [],
@@ -3474,6 +3475,7 @@ async function runCli(args) {
   if (command === "explain-review-risk") return explainReviewRiskCli(options);
   if (command === "notifications") return notificationsCli(options);
   if (command === "notifications-read") return notificationsReadCli(options);
+  if (command === "watch") return watchCli(args.slice(1));
   if (command === "review-pr") return reviewPrCli(options);
   if (command !== "analyze-branch" && command !== "preflight") {
     const suggestion = suggestCommand(command);
@@ -4072,6 +4074,68 @@ async function notificationsCli(options) {
   }
 }
 
+// #6746: contributor-scoped mirror of the loopover_watch_issues MCP tool and the /v1/contributors/{login}/watches
+// route family. The MCP tool's action enum maps to subcommands here: list=GET, add=POST, remove=DELETE.
+async function watchCli(args) {
+  const subcommand = args[0];
+  if (!subcommand || subcommand === "--help" || subcommand === "help") return printWatchHelp();
+  const positional = args[1] && !args[1].startsWith("--") ? args[1] : undefined;
+  const options = parseOptions(args.slice(1));
+  const login = options.login ?? activeProfile.session?.login ?? process.env.LOOPOVER_LOGIN ?? process.env.GITHUB_LOGIN;
+  if (!login) throw new Error("Pass --login <github-login>, log in with `loopover-mcp login`, or set LOOPOVER_LOGIN.");
+  const base = `/v1/contributors/${encodeURIComponent(login)}/watches`;
+  // The API chooses `changed` / repo / label text, so the plain-text path is sanitized (#6261); `login` is the
+  // user's own value.
+  const render = (payload) =>
+    [
+      `Watching ${(payload.watching ?? []).length} repo(s) for ${login}${payload.changed ? ` (${sanitizePlainTextTerminalOutput(payload.changed)})` : ""}.`,
+      ...(payload.watching ?? []).map((watch) => {
+        const labels = (watch.labels ?? []).length > 0 ? ` [${watch.labels.map(sanitizePlainTextTerminalOutput).join(", ")}]` : "";
+        return `- ${sanitizePlainTextTerminalOutput(watch.repoFullName)}${labels}`;
+      }),
+    ].join("\n");
+  const emit = (payload) => {
+    if (options.json) process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`);
+    else process.stdout.write(`${render(payload)}\n`);
+  };
+
+  if (subcommand === "list") {
+    emit(await apiGet(base));
+    return;
+  }
+  if (subcommand === "add" || subcommand === "remove") {
+    if (!positional || !positional.includes("/")) {
+      throw new Error(`Pass the repo: loopover-mcp watch ${subcommand} <owner/repo>.`);
+    }
+    if (subcommand === "add") {
+      const labels =
+        typeof options.labels === "string" ? options.labels.split(",").map((label) => label.trim()).filter(Boolean) : [];
+      emit(await apiPost(base, { repoFullName: positional, ...(labels.length > 0 ? { labels } : {}) }));
+    } else {
+      emit(await apiDelete(base, { repoFullName: positional }));
+    }
+    return;
+  }
+  throw new Error(`Unknown watch subcommand: ${subcommand}. Use list | add <owner/repo> [--labels a,b] | remove <owner/repo>.`);
+}
+
+function printWatchHelp() {
+  process.stdout.write(
+    [
+      "Usage: loopover-mcp watch <list|add|remove> [owner/repo] [--labels a,b] [--login <github-login>] [--json]",
+      "",
+      "Manage your issue-watch subscriptions (mirrors the loopover_watch_issues MCP tool and the",
+      "/v1/contributors/{login}/watches routes):",
+      "  list                         Show the repos you are watching.",
+      "  add <owner/repo> [--labels]  Watch a repo for new grabbable issues (optional comma-separated label filter).",
+      "  remove <owner/repo>          Stop watching a repo.",
+      "",
+      "Login resolves from --login, the active session, LOOPOVER_LOGIN, then GITHUB_LOGIN.",
+      "Pass --json for machine-readable output.",
+    ].join("\n") + "\n",
+  );
+}
+
 function printNotificationsReadHelp() {
   process.stdout.write(
     [
@@ -4585,6 +4649,7 @@ function printHelp() {
   loopover-mcp explain-review-risk --repo owner/repo --title <text> [--login <github-login>] [--body <text>] [--json]
   loopover-mcp notifications --login <github-login> [--json]
   loopover-mcp notifications-read --login <github-login> [--id <delivery-id>]... [--json]
+  loopover-mcp watch <list|add|remove> [owner/repo] [--labels a,b] [--login <github-login>] [--json]
   loopover-mcp analyze-branch --login <github-login> [--repo owner/repo] [--base origin/main] [--branch-eligibility eligible|ineligible|unknown] [--pending-merged-prs 3] [--expected-open-prs 0] [--projected-credibility 0.8] [--scenario-note "..."] [--validation "passed|npm test|summary"] [--format table] [--json]
   loopover-mcp preflight --login <github-login> [--repo owner/repo] [--base origin/main] [--branch-eligibility eligible|ineligible|unknown] [--pending-merged-prs 3] [--expected-open-prs 0] [--projected-credibility 0.8] [--validation "passed|npm test|summary"] [--format table] [--json]
   loopover-mcp review-pr --login <github-login> [--repo owner/repo] [--base origin/main] [--commit <message>]... [--body <text>] [--body-file <path>] [--linked-issue <number>] [--json]
@@ -6101,6 +6166,10 @@ async function apiGet(path) {
 
 async function apiPost(path, body) {
   return apiFetch(path, { method: "POST", body: JSON.stringify(body) });
+}
+
+async function apiDelete(path, body) {
+  return apiFetch(path, { method: "DELETE", body: JSON.stringify(body) });
 }
 
 async function apiFetch(path, init, options = {}) {
