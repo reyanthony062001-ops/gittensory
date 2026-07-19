@@ -380,7 +380,7 @@ jobs:
             turbo-${{ hashFiles('package-lock.json') }}-
       - name: Build engine package
         if: ${{ github.event_name == 'push' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.engine == 'true' || needs.changes.outputs.ui == 'true' }}
-        run: turbo run build --filter=@loopover/engine
+        run: npx turbo run build --filter=@loopover/engine
       - name: Save Turborepo cache
         if: ${{ !cancelled() && (github.event_name == 'push' || needs.changes.outputs.backend == 'true' || needs.changes.outputs.engine == 'true' || needs.changes.outputs.ui == 'true') }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -673,7 +673,7 @@ jobs:
           restore-keys: |
             turbo-${{ hashFiles('package-lock.json') }}-
       - name: Build engine package
-        run: turbo run build --filter=@loopover/engine
+        run: npx turbo run build --filter=@loopover/engine
       - name: Save Turborepo cache
         if: ${{ !cancelled() }}
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
