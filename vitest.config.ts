@@ -30,12 +30,17 @@ export default defineConfig({
         "src/**/*.ts",
         "packages/loopover-engine/src/**/*.ts",
         "packages/loopover-miner/lib/**/*.js",
+        "packages/discovery-index/src/**/*.ts",
         // review-enrichment is a standalone (non-workspace) package with its own node:test suite; its
         // coverage is collected separately via `npm run rees:coverage` (c8 over the built dist, remapped
         // to src through source maps) and uploaded to Codecov under the `rees` flag -- vitest never runs
         // it, so it must not be listed here (an entry here just reports 0% for files vitest can't reach).
       ],
-      exclude: ["src/env.d.ts", "apps/**"],
+      // packages/discovery-index/src/server.ts is the process entrypoint (calls @hono/node-server's serve()
+      // as a side effect of import) -- like the main app's own src/server.ts, it's exercised by a Docker
+      // build+boot path, not unit-coverable without actually binding a port. See codecov.yml's matching
+      // ignore entry; app.ts (everything server.ts wires together) is what tests actually import.
+      exclude: ["src/env.d.ts", "apps/**", "packages/discovery-index/src/server.ts"],
       // Emit lcov for Codecov to compute patch (changed-lines) coverage.
       reporter: ["text", "lcov"],
       // The 99% requirement now lives in codecov.yml as a *patch* gate (changed

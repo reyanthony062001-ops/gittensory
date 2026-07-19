@@ -1,0 +1,154 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { AiPolicyVerdict, DiscoveryIndexCandidate } from "@loopover/engine";
+import { createApp, type AppDeps } from "../../../packages/discovery-index/src/app";
+import { TtlCache } from "../../../packages/discovery-index/src/cache";
+import { resetMetrics } from "../../../packages/discovery-index/src/metrics";
+import type { GitHubClientLike } from "../../../packages/discovery-index/src/discovery-query";
+
+function makeDeps(overrides: Partial<AppDeps> = {}): AppDeps {
+  const github: GitHubClientLike = {
+    async fetchRepoIssues(repoFullName: string) {
+      return { issues: repoFullName === "acme/widgets" ? [{ number: 1, title: "Fix it" }] : [], warnings: [] };
+    },
+    async searchIssues() {
+      return { issues: [], warnings: [] };
+    },
+    async fetchRepoFile() {
+      return { content: null };
+    },
+  };
+  return {
+    github,
+    resultCache: new TtlCache<DiscoveryIndexCandidate[]>(),
+    policyCache: new TtlCache<AiPolicyVerdict>(),
+    cacheTtlMs: 300_000,
+    githubConfigured: true,
+    ...overrides,
+  };
+}
+
+describe("discovery-index Hono app (#7164)", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    resetMetrics();
+  });
+
+  it("GET /health reports liveness", async () => {
+    const app = createApp(makeDeps());
+    const res = await app.request("/health");
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ status: "ok", service: "discovery-index" });
+  });
+
+  it("GET /ready reports 200 when the GitHub token is configured, 503 otherwise", async () => {
+    const ready = await createApp(makeDeps({ githubConfigured: true })).request("/ready");
+    expect(ready.status).toBe(200);
+    expect(await ready.json()).toEqual({ ready: true });
+
+    const notReady = await createApp(makeDeps({ githubConfigured: false })).request("/ready");
+    expect(notReady.status).toBe(503);
+    expect(await notReady.json()).toEqual({ ready: false });
+  });
+
+  it("GET /metrics renders Prometheus text after a request has been recorded", async () => {
+    vi.stubEnv("DISCOVERY_INDEX_SHARED_SECRET", "sek");
+    const app = createApp(makeDeps());
+    await app.request("/v1/discovery-index/query", {
+      method: "POST",
+      headers: { authorization: "Bearer sek", "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    const res = await app.request("/metrics");
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toContain("discovery_index_query_requests_total");
+  });
+
+  describe("POST /v1/discovery-index/query", () => {
+    it("fails closed with 503 when no shared secret is configured", async () => {
+      vi.stubEnv("DISCOVERY_INDEX_SHARED_SECRET", "");
+      const app = createApp(makeDeps());
+      const res = await app.request("/v1/discovery-index/query", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: "service_not_configured" });
+    });
+
+    it("returns 401 for a missing or incorrect bearer token", async () => {
+      vi.stubEnv("DISCOVERY_INDEX_SHARED_SECRET", "sek");
+      const app = createApp(makeDeps());
+      const noAuth = await app.request("/v1/discovery-index/query", { method: "POST", body: JSON.stringify({}) });
+      expect(noAuth.status).toBe(401);
+
+      const wrongAuth = await app.request("/v1/discovery-index/query", {
+        method: "POST",
+        headers: { authorization: "Bearer nope" },
+        body: JSON.stringify({}),
+      });
+      expect(wrongAuth.status).toBe(401);
+    });
+
+    it("returns 400 for an unparseable JSON body", async () => {
+      vi.stubEnv("DISCOVERY_INDEX_SHARED_SECRET", "sek");
+      const app = createApp(makeDeps());
+      const res = await app.request("/v1/discovery-index/query", {
+        method: "POST",
+        headers: { authorization: "Bearer sek", "content-type": "application/json" },
+        body: "not json",
+      });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toEqual({ error: "invalid_json" });
+    });
+
+    it("accepts a valid empty body as an empty query and returns 200", async () => {
+      vi.stubEnv("DISCOVERY_INDEX_SHARED_SECRET", "sek");
+      const app = createApp(makeDeps());
+      const res = await app.request("/v1/discovery-index/query", {
+        method: "POST",
+        headers: { authorization: "Bearer sek", "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ candidates: [], nextCursor: null });
+    });
+
+    it("returns 200 with candidates for a valid authenticated request", async () => {
+      vi.stubEnv("DISCOVERY_INDEX_SHARED_SECRET", "sek");
+      const app = createApp(makeDeps());
+      const res = await app.request("/v1/discovery-index/query", {
+        method: "POST",
+        headers: { authorization: "Bearer sek", "content-type": "application/json" },
+        body: JSON.stringify({ repos: ["acme/widgets"] }),
+      });
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as { candidates: unknown[] };
+      expect(body.candidates).toHaveLength(1);
+    });
+
+    it("returns 500 via the centralized error handler when the query pipeline throws", async () => {
+      vi.stubEnv("DISCOVERY_INDEX_SHARED_SECRET", "sek");
+      const failingGithub: GitHubClientLike = {
+        async fetchRepoIssues() {
+          throw new Error("network exploded");
+        },
+        async searchIssues() {
+          return { issues: [], warnings: [] };
+        },
+        async fetchRepoFile() {
+          return { content: null };
+        },
+      };
+      const app = createApp(makeDeps({ github: failingGithub }));
+      const res = await app.request("/v1/discovery-index/query", {
+        method: "POST",
+        headers: { authorization: "Bearer sek", "content-type": "application/json" },
+        body: JSON.stringify({ repos: ["acme/widgets"] }),
+      });
+      expect(res.status).toBe(500);
+      expect(await res.json()).toEqual({ error: "internal_error" });
+    });
+  });
+});

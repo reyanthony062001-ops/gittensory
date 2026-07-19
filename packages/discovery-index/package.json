@@ -1,0 +1,24 @@
+{
+  "name": "@loopover/discovery-index",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "LoopOver hosted discovery-index service (#4250) — a shared, cached GitHub issue/search fan-out and soft-claim coordinator opted-in miner instances can query instead of each independently hammering GitHub. Deploys standalone; see #7164.",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "dev": "node --experimental-strip-types --watch src/server.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "^1.19.14",
+    "@loopover/engine": "^3.4.0",
+    "hono": "^4.12.27"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.0",
+    "typescript": "^5.9.3"
+  }
+}

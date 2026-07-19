@@ -23,6 +23,7 @@
 #   --profile workflows         n8n workflow automation (Slack/Teams/email fan-out, scheduled reports)
 #   --profile storage           MinIO S3-compatible object store (Litestream destination, artifact blobs)
 #   --profile caddy             Caddy HTTPS terminator with auto-TLS (set DOMAIN= in .env)
+#   --profile discovery-index   Local orchestration for the hosted discovery-index service (#4250, #7164)
 #   --profile observability     Prometheus + Alertmanager + Loki + Promtail + Grafana (pre-wired)
 #   --profile ams-observability Exports AMS (loopover-miner) attempt-log/prediction-ledger data to the
 #                               AMS Attempt Log / Prediction Ledger Grafana datasources
@@ -657,6 +658,47 @@ services:
     # loopover service above there's no deeper readiness signal to prefer here; /health also matches
     # Railway's own healthcheckPath for this service. `node -e fetch(...)` avoids assuming curl/wget exist --
     # review-enrichment/Dockerfile's runtime stage is node:22-slim, which installs neither.
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8080/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  # ── discovery-index (--profile discovery-index) ────────────────────────────
+  # Local orchestration only, for testing against the hosted discovery-index service (#4250, #7164) before
+  # it exists anywhere public -- the actual public hosting/DNS/TLS decision is separate (#7167), not this.
+  # Unlike rees above, the build context is the repo root: this service depends on the @loopover/engine
+  # workspace package, so its Dockerfile installs via npm workspaces rather than a self-contained `npm ci`.
+  discovery-index:
+    build:
+      context: .
+      dockerfile: packages/discovery-index/Dockerfile
+    restart: unless-stopped
+    <<: *default-logging
+    profiles: ["discovery-index"]
+    environment:
+      PORT: "8080"
+      # Soft defaults, not ":?required" -- compose interpolates every service's env vars for the whole file
+      # even when --profile discovery-index isn't active (same reasoning as REES_SHARED_SECRET above). Unset
+      # DISCOVERY_INDEX_SHARED_SECRET means the service fails closed (503) on every query call; unset
+      # DISCOVERY_INDEX_GITHUB_TOKEN means /ready reports not-ready.
+      DISCOVERY_INDEX_SHARED_SECRET: ${DISCOVERY_INDEX_SHARED_SECRET:-}
+      DISCOVERY_INDEX_GITHUB_TOKEN: ${DISCOVERY_INDEX_GITHUB_TOKEN:-}
+    # Never published to the host -- reached only over the internal docker network, same in-network-only
+    # posture as rees above.
+    expose:
+      - "8080"
+    deploy:
+      resources:
+        limits:
+          memory: "${DISCOVERY_INDEX_MEM_LIMIT:-512m}"
     healthcheck:
       test:
         [
