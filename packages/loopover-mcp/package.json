@@ -33,12 +33,14 @@
     "lib",
     "scripts",
     "CHANGELOG.md",
+    "!bin/**/*.ts",
     "!lib/**/*.ts",
-    "!scripts/check-syntax.mjs"
+    "!scripts/check-syntax.mjs",
+    "!scripts/strip-bin-sourcemap.mjs"
   ],
   "scripts": {
     "build": "npm run build:tsc && npm run build:verify",
-    "build:tsc": "tsc -p tsconfig.json",
+    "build:tsc": "tsc -p tsconfig.json && node scripts/strip-bin-sourcemap.mjs",
     "build:verify": "node scripts/check-syntax.mjs"
   },
   "dependencies": {

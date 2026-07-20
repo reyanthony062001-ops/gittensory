@@ -5,10 +5,13 @@
 // added, removed, or migrated to TypeScript (#7290's mcp counterpart, #7291). Glob-driven instead: covers
 // every file automatically, migrated or not, with no list to fall out of date.
 import { readdirSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 
-const ROOT = new URL("..", import.meta.url).pathname;
+// fileURLToPath (not URL.pathname): on Windows, pathname is "/D:/..." and join() can produce a doubled
+// drive prefix (D:\D:\...), which breaks readdirSync. Same pattern as packages/loopover-miner/bin.
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 function listFiles(dir, extension) {
   return readdirSync(join(ROOT, dir), { withFileTypes: true })
